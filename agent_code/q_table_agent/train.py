@@ -23,6 +23,7 @@ def setup_training(self):
     self.epsilon = EPSILON_START
     self.round_reward = 0.0
     self.round_steps = 0
+    self.last_update = None
 
 
 def game_events_occurred(self, old_game_state: dict, self_action: str,
@@ -33,6 +34,8 @@ def game_events_occurred(self, old_game_state: dict, self_action: str,
     old_state = state_to_features(old_game_state)
     new_state = state_to_features(new_game_state)
     reward = reward_from_events(events)
+    previous_q = float(get_q_values(self, old_state)[ACTIONS.index(self_action)])
+    self.last_update = (old_game_state['round'], old_game_state['step'], previous_q, reward)
 
     update_q_value(self, old_state, self_action, new_state, reward)
     self.round_reward += reward
@@ -59,6 +62,13 @@ def end_of_round(self, last_game_state: dict, last_action: str, events: list):
     if last_game_state is not None and last_action is not None:
         last_state = state_to_features(last_game_state)
         reward = reward_from_events(events)
+        # The framework also sends this action through game_events_occurred.
+        # Replace that update with the terminal update and count the action once.
+        if (self.last_update is not None and
+                self.last_update[:2] == (last_game_state['round'], last_game_state['step'])):
+            get_q_values(self, last_state)[ACTIONS.index(last_action)] = self.last_update[2]
+            self.round_reward -= self.last_update[3]
+            self.round_steps -= 1
 
         update_q_value(self, last_state, last_action, None, reward)
         self.round_reward += reward
@@ -71,5 +81,7 @@ def end_of_round(self, last_game_state: dict, last_action: str, events: list):
     with open(self.model_path, 'wb') as file:
         pickle.dump(self.q_table, file)
     self.epsilon = max(EPSILON_MIN, self.epsilon * EPSILON_DECAY)
+    self.last_round_reward = self.round_reward
+    self.last_update = None
     self.round_reward = 0.0
     self.round_steps = 0

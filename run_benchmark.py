@@ -1,4 +1,5 @@
 import json
+import importlib
 import logging
 import random
 import subprocess
@@ -37,6 +38,9 @@ def play_game(config):
     """Play one game and return the results for every agent."""
     s.MAX_STEPS = config['max_steps']
     random.seed(config['agent_seed'])
+    if config.get('model_path'):
+        callbacks = importlib.import_module(f"agent_code.{config['agents'][0]}.callbacks")
+        callbacks.MODEL_PATH = Path(config['model_path']).resolve()
     s.LOG_GAME = logging.WARNING
     s.LOG_AGENT_WRAPPER = logging.WARNING
     s.LOG_AGENT_CODE = logging.WARNING
@@ -139,6 +143,7 @@ def main(argv=None):
     parser.add_argument('--max-steps', type=int, default=s.MAX_STEPS)
     parser.add_argument('--metric', choices=['coins', 'score'])
     parser.add_argument('--output', type=Path)
+    parser.add_argument('--model-path', type=Path, help='Checkpoint for a single candidate.')
     parser.add_argument('--bootstrap-samples', type=int, default=2000)
     parser.add_argument('--analysis-seed', type=int, default=0)
     parser.add_argument('--worker', type=Path, help=SUPPRESS)
@@ -153,6 +158,8 @@ def main(argv=None):
     if not args.agents or not args.seeds or not args.output:
         parser.error('--agents, --seeds, and --output are required.')
     names = args.agents + args.opponents
+    if args.model_path and (len(args.agents) != 1 or args.agents[0] in args.opponents):
+        parser.error('--model-path requires one candidate, not repeated as an opponent.')
     if len(args.opponents) >= s.MAX_AGENTS:
         parser.error('At most three opponents are allowed.')
     if len(set(args.seeds)) != len(args.seeds):
@@ -169,6 +176,7 @@ def main(argv=None):
     args.output.mkdir(parents=True)
     saved_args = vars(args).copy()
     saved_args['output'] = str(args.output)
+    saved_args['model_path'] = str(args.model_path.resolve()) if args.model_path else None
     save_json(args.output / 'config.json', saved_args)
     results = []
     with open(args.output / 'games.jsonl', 'w') as file:
@@ -179,6 +187,7 @@ def main(argv=None):
                         game_dir = args.output / 'games' / f'{len(results):04d}'
                         game_dir.mkdir(parents=True)
                         config = {
+                            'model_path': str(args.model_path.resolve()) if args.model_path else None,
                             'agents': [candidate] + args.opponents,
                             'scenario': args.scenario,
                             'seed': seed,
