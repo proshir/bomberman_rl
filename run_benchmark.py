@@ -1,5 +1,6 @@
 import json
 import logging
+import random
 import subprocess
 import sys
 from argparse import ArgumentParser, SUPPRESS
@@ -35,6 +36,7 @@ def save_json(path, data):
 def play_game(config):
     """Play one game and return the results for every agent."""
     s.MAX_STEPS = config['max_steps']
+    random.seed(config['agent_seed'])
     s.LOG_GAME = logging.WARNING
     s.LOG_AGENT_WRAPPER = logging.WARNING
     s.LOG_AGENT_CODE = logging.WARNING
@@ -44,9 +46,14 @@ def play_game(config):
     world = BenchmarkWorld(args, [(name, False) for name in config['agents']])
     world.new_round()
     starts = [agent.get_state()[-1] for agent in world.agents]
+    coin_task = config['scenario'] == 'coin-heaven' and len(world.agents) == 1
+    completion_steps = None
     started = perf_counter()
     while world.running:
         world.do_step()
+        if (coin_task and completion_steps is None and
+                world.agents[0].statistics['coins'] == len(world.coins)):
+            completion_steps = world.step
     elapsed = perf_counter() - started
     results = []
     for agent, start in zip(world.agents, starts):
@@ -62,6 +69,9 @@ def play_game(config):
             'steps': stats['steps'],
             'dead': agent.dead,
         })
+        if coin_task:
+            results[-1]['completed'] = completion_steps is not None
+            results[-1]['completion_steps'] = completion_steps
     world.end()
     return {'seed': config['seed'], 'agent_seed': config['agent_seed'],
             'seat': config['seat'], 'steps': world.step,
@@ -94,6 +104,15 @@ def summarize(results, candidates, metric, seeds, samples, seed):
             'ci95': confidence_interval(values, samples, seed),
             'board_means': values,
         }
+        games = [game['agents'][0] for game in results if game['candidate'] == candidate]
+        if all('completed' in game for game in games):
+            completed = [game['completion_steps'] for game in games if game['completed']]
+            summary['agents'][candidate].update({
+                'games': len(games),
+                'successes': len(completed),
+                'completion_rate': len(completed) / len(games),
+                'mean_completion_steps': float(np.mean(completed)) if completed else None,
+            })
     baseline = values_by_agent[candidates[0]]
     for candidate in candidates[1:]:
         difference = np.asarray(values_by_agent[candidate]) - baseline
