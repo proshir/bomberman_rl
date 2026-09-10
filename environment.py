@@ -109,7 +109,11 @@ class GenericWorld:
         assert len(self.agents) < s.MAX_AGENTS
 
         # if self.args.single_process:
-        backend = SequentialAgentBackend(train, name, agent_dir)
+        seed = getattr(self.args, 'agent_seed', None)
+        if seed is not None:
+            seed = (seed + len(self.agents)) % 2**32
+        backend = SequentialAgentBackend(train, name, agent_dir, seed,
+                                          getattr(self.args, 'agent_log_dir', None))
         # else:
         # backend = ProcessAgentBackend(train, name, agent_dir)
         backend.start()

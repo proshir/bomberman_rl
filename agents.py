@@ -10,6 +10,8 @@ from time import time
 from types import SimpleNamespace
 from typing import Tuple, Any
 
+import numpy as np
+
 import events as e
 import settings as s
 from fallbacks import pygame
@@ -196,7 +198,7 @@ class AgentRunner:
     Agent callback runner (called by backend).
     """
 
-    def __init__(self, train, agent_name, code_name, result_queue):
+    def __init__(self, train, agent_name, code_name, result_queue, seed=None, log_dir=None):
         self.agent_name = agent_name
         self.code_name = code_name
         self.result_queue = result_queue
@@ -218,14 +220,16 @@ class AgentRunner:
 
         self.fake_self = SimpleNamespace()
         self.fake_self.train = train
+        self.fake_self.seed = seed
+        self.fake_self.rng = np.random.default_rng(seed)
 
         self.wlogger = logging.getLogger(self.agent_name + '_wrapper')
         self.wlogger.setLevel(s.LOG_AGENT_WRAPPER)
         self.fake_self.logger = logging.getLogger(self.agent_name + '_code')
         self.fake_self.logger.setLevel(s.LOG_AGENT_CODE)
-        log_dir = f'agent_code/{self.code_name}/logs/'
+        log_dir = log_dir or f'agent_code/{self.code_name}/logs/'
         if not os.path.exists(log_dir): os.makedirs(log_dir)
-        handler = logging.FileHandler(f'{log_dir}{self.agent_name}.log', mode="w")
+        handler = logging.FileHandler(os.path.join(log_dir, f'{self.agent_name}.log'), mode="w")
         handler.setLevel(logging.DEBUG)
         formatter = logging.Formatter('%(asctime)s [%(name)s] %(levelname)s: %(message)s')
         handler.setFormatter(formatter)
@@ -293,12 +297,15 @@ class SequentialAgentBackend(AgentBackend):
     AgentConnector realised in main thread (easy debugging).
     """
 
-    def __init__(self, train, agent_name, code_name):
+    def __init__(self, train, agent_name, code_name, seed=None, log_dir=None):
         super().__init__(train, agent_name, code_name, queue.Queue())
         self.runner = None
+        self.seed = seed
+        self.log_dir = log_dir
 
     def start(self):
-        self.runner = AgentRunner(self.train, self.agent_name, self.code_name, self.result_queue)
+        self.runner = AgentRunner(self.train, self.agent_name, self.code_name, self.result_queue,
+                                  self.seed, self.log_dir)
 
     def send_event(self, event_name, *event_args):
         prev_cwd = os.getcwd()

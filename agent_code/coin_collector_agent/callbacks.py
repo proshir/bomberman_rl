@@ -65,7 +65,7 @@ def setup(self):
     file for debugging (see https://docs.python.org/3.7/library/logging.html).
     """
     self.logger.debug('Successfully entered setup code')
-    np.random.seed()
+    np.random.seed(getattr(self, 'seed', None))
 
 
 def act(self, game_state):
