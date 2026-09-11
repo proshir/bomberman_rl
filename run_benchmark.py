@@ -41,6 +41,9 @@ def play_game(config):
     if config.get('model_path'):
         callbacks = importlib.import_module(f"agent_code.{config['agents'][0]}.callbacks")
         callbacks.MODEL_PATH = Path(config['model_path']).resolve()
+    if config.get('feature_mode'):
+        callbacks = importlib.import_module(f"agent_code.{config['agents'][0]}.callbacks")
+        callbacks.FEATURE_MODE = config['feature_mode']
     s.LOG_GAME = logging.WARNING
     s.LOG_AGENT_WRAPPER = logging.WARNING
     s.LOG_AGENT_CODE = logging.WARNING
@@ -88,8 +91,10 @@ def confidence_interval(values, samples, seed):
     if len(values) < 2:
         return None
     rng = np.random.default_rng(seed)
-    means = [rng.choice(values, len(values), replace=True).mean()
-             for _ in range(samples)]
+    means = []
+    for _ in range(samples):
+        sample = rng.choice(values, len(values), replace=True)
+        means.append(sample.mean())
     return np.quantile(means, [0.025, 0.975]).tolist()
 
 
@@ -97,18 +102,20 @@ def summarize(results, candidates, metric, seeds, samples, seed):
     summary = {'metric': metric, 'agents': {}, 'comparisons': {}}
     values_by_agent = {}
     for candidate in candidates:
+        candidate_games = [game for game in results if game['candidate'] == candidate]
+        # Average corners and action seeds first, then compare board averages.
         values = []
         for game_seed in seeds:
-            games = [game['agents'][0][metric] for game in results
-                     if game['candidate'] == candidate and game['seed'] == game_seed]
-            values.append(float(np.mean(games)))
+            scores = [game['agents'][0][metric] for game in candidate_games
+                      if game['seed'] == game_seed]
+            values.append(float(np.mean(scores)))
         values_by_agent[candidate] = values
         summary['agents'][candidate] = {
             'mean': float(np.mean(values)),
             'ci95': confidence_interval(values, samples, seed),
             'board_means': values,
         }
-        games = [game['agents'][0] for game in results if game['candidate'] == candidate]
+        games = [game['agents'][0] for game in candidate_games]
         if all('completed' in game for game in games):
             completed = [game['completion_steps'] for game in games if game['completed']]
             summary['agents'][candidate].update({
@@ -127,7 +134,7 @@ def summarize(results, candidates, metric, seeds, samples, seed):
     return summary
 
 
-def main(argv=None):
+def parse_args(argv=None):
     parser = ArgumentParser(description='Compare agents on matching Bomberman games.')
     parser.add_argument('--agents', nargs='+',
                         help='Agents to compare; the first one is the baseline.')
@@ -144,16 +151,15 @@ def main(argv=None):
     parser.add_argument('--metric', choices=['coins', 'score'])
     parser.add_argument('--output', type=Path)
     parser.add_argument('--model-path', type=Path, help='Checkpoint for a single candidate.')
+    parser.add_argument('--feature-mode', choices=['compact', 'position', 'distance', 'rich'],
+                        default='distance')
     parser.add_argument('--bootstrap-samples', type=int, default=2000)
     parser.add_argument('--analysis-seed', type=int, default=0)
     parser.add_argument('--worker', type=Path, help=SUPPRESS)
     args = parser.parse_args(argv)
 
     if args.worker:
-        with open(args.worker) as file:
-            config = json.load(file)
-        save_json(args.worker.parent / 'result.json', play_game(config))
-        return
+        return args
 
     if not args.agents or not args.seeds or not args.output:
         parser.error('--agents, --seeds, and --output are required.')
@@ -172,11 +178,16 @@ def main(argv=None):
     if args.max_steps < 1:
         parser.error('The step limit must be positive.')
 
+    return args
+
+
+def run_benchmark(args):
     metric = args.metric or ('score' if args.opponents else 'coins')
+    model_path = str(args.model_path.resolve()) if args.model_path else None
     args.output.mkdir(parents=True)
     saved_args = vars(args).copy()
     saved_args['output'] = str(args.output)
-    saved_args['model_path'] = str(args.model_path.resolve()) if args.model_path else None
+    saved_args['model_path'] = model_path
     save_json(args.output / 'config.json', saved_args)
     results = []
     with open(args.output / 'games.jsonl', 'w') as file:
@@ -187,7 +198,8 @@ def main(argv=None):
                         game_dir = args.output / 'games' / f'{len(results):04d}'
                         game_dir.mkdir(parents=True)
                         config = {
-                            'model_path': str(args.model_path.resolve()) if args.model_path else None,
+                            'model_path': model_path,
+                            'feature_mode': args.feature_mode,
                             'agents': [candidate] + args.opponents,
                             'scenario': args.scenario,
                             'seed': seed,
@@ -197,9 +209,11 @@ def main(argv=None):
                             'log_dir': str(game_dir),
                             'agent_log_dir': str(game_dir / 'agents'),
                         }
-                        save_json(game_dir / 'config.json', config)
-                        subprocess.run([sys.executable, __file__, '--worker',
-                                        str(game_dir / 'config.json')], check=True)
+                        config_path = game_dir / 'config.json'
+                        save_json(config_path, config)
+                        # A fresh process keeps settings and random state separate.
+                        command = [sys.executable, __file__, '--worker', str(config_path)]
+                        subprocess.run(command, check=True)
                         with open(game_dir / 'result.json') as result_file:
                             result = json.load(result_file)
                         result['candidate'] = candidate
@@ -211,6 +225,17 @@ def main(argv=None):
     print(f'Results saved to {args.output}')
     for candidate, result in summary['agents'].items():
         print(f'{candidate}: {metric} = {result["mean"]:.2f}')
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    if args.worker:
+        with open(args.worker) as file:
+            config = json.load(file)
+        result = play_game(config)
+        save_json(args.worker.parent / 'result.json', result)
+    else:
+        run_benchmark(args)
 
 
 if __name__ == '__main__':

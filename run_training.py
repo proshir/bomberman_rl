@@ -28,6 +28,7 @@ def evaluate(config, learner, episode, interactions):
     command = [
         sys.executable, str(SOURCE_DIR / 'run_benchmark.py'),
         '--agents', config['agent'], '--scenario', 'coin-heaven',
+        '--feature-mode', config['feature_mode'],
         '--model-path', str(checkpoint), '--max-steps', str(config['max_steps']),
         '--seeds', *map(str, config['eval_seeds']),
         '--agent-seeds', '0', '--seats', '0', '1', '2', '3',
@@ -38,8 +39,12 @@ def evaluate(config, learner, episode, interactions):
         subprocess.run(command, check=True, stdout=log, stderr=subprocess.STDOUT)
     with open(output / 'summary.json') as file:
         result = json.load(file)['agents'][config['agent']]
-    return {'episode': episode, 'interactions': interactions,
-            'checkpoint': str(checkpoint), **result}
+    return {
+        'episode': episode,
+        'interactions': interactions,
+        'checkpoint': str(checkpoint),
+        **result,
+    }
 
 
 def train(config):
@@ -47,6 +52,7 @@ def train(config):
     directory = Path(config['output'])
     callbacks = importlib.import_module(f"agent_code.{config['agent']}.callbacks")
     callbacks.MODEL_PATH = directory / 'training.pkl'
+    callbacks.FEATURE_MODE = config['feature_mode']
     s.MAX_STEPS = config['max_steps']
     s.LOG_GAME = s.LOG_AGENT_WRAPPER = s.LOG_AGENT_CODE = logging.WARNING
     random.seed(config['seed'])
@@ -79,11 +85,16 @@ def train(config):
             interactions += world.step
             agent = world.agents[0]
             record = {
-                'episode': episode, 'board_seed': board_seed,
-                'agent_seed': config['seed'], 'seat': args.seat,
-                'steps': world.step, 'interactions': interactions,
-                'coins': agent.statistics['coins'], 'score': agent.score,
-                'reward': learner.last_round_reward, 'epsilon': epsilon,
+                'episode': episode,
+                'board_seed': board_seed,
+                'agent_seed': config['seed'],
+                'seat': args.seat,
+                'steps': world.step,
+                'interactions': interactions,
+                'coins': agent.statistics['coins'],
+                'score': agent.score,
+                'reward': learner.last_round_reward,
+                'epsilon': epsilon,
                 'table_size': len(learner.q_table),
                 'training_seconds': training_seconds,
             }
@@ -95,10 +106,11 @@ def train(config):
     world.end()
 
 
-def main(argv=None):
-    """Run small independent Q-table pilots with saved settings and checkpoints."""
+def parse_args(argv=None):
     parser = ArgumentParser(description='Train and evaluate the coin Q-table agent.')
     parser.add_argument('--agent', default='q_table_agent')
+    parser.add_argument('--feature-mode', choices=['compact', 'position', 'distance', 'rich'],
+                        default='distance')
     parser.add_argument('--seeds', type=int, nargs='+', default=[0, 1, 2])
     parser.add_argument('--rounds', type=int, default=300)
     parser.add_argument('--max-steps', type=int, default=100)
@@ -108,20 +120,23 @@ def main(argv=None):
     parser.add_argument('--worker', type=Path, help=SUPPRESS)
     args = parser.parse_args(argv)
     if args.worker:
-        with open(args.worker) as file:
-            train(json.load(file))
-        return
+        return args
     if args.output is None or args.output.exists():
         parser.error('Choose a new --output directory.')
     if min(args.rounds, args.max_steps, args.eval_every) < 1:
         parser.error('Round counts and step limits must be positive.')
-    if len(set(args.seeds)) != len(args.seeds) or len(set(args.eval_seeds)) != len(args.eval_seeds):
-        parser.error('Seeds must be unique within each list.')
+    for seeds in (args.seeds, args.eval_seeds):
+        if len(set(seeds)) != len(seeds):
+            parser.error('Seeds must be unique within each list.')
     if any(seed < 0 or seed >= 2**32 for seed in args.seeds + args.eval_seeds):
         parser.error('Seeds must be between 0 and 2**32 - 1.')
     board_seeds = range(1000, 1000 + args.rounds * len(args.seeds))
     if set(board_seeds).intersection(args.eval_seeds):
         parser.error('Evaluation seeds overlap the training board seeds.')
+    return args
+
+
+def run_training(args):
     module = importlib.import_module(f'agent_code.{args.agent}.train')
     args.output = args.output.resolve()
     args.output.mkdir(parents=True)
@@ -149,16 +164,30 @@ def main(argv=None):
     for index, seed in enumerate(args.seeds):
         directory = args.output / f'seed_{seed}'
         directory.mkdir()
-        run_config = {**config, 'seed': seed, 'output': str(directory),
-                      'board_start': 1000 + index * args.rounds}
-        save_json(directory / 'config.json', run_config)
-        subprocess.run([sys.executable, str(Path(__file__).resolve()), '--worker',
-                        str(directory / 'config.json')], check=True)
+        run_config = config.copy()
+        run_config['seed'] = seed
+        run_config['output'] = str(directory)
+        run_config['board_start'] = 1000 + index * args.rounds
+        config_path = directory / 'config.json'
+        save_json(config_path, run_config)
+        # Each training run starts with fresh agent state and random generators.
+        command = [sys.executable, str(Path(__file__).resolve()), '--worker', str(config_path)]
+        subprocess.run(command, check=True)
         with open(directory / 'learning_curve.json') as file:
             curve.extend({'seed': seed, **row} for row in json.load(file))
     save_json(args.output / 'learning_curve.json', curve)
     for row in curve:
         print(f"Seed {row['seed']}, episode {row['episode']}: coins = {row['mean']:.2f}")
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    if args.worker:
+        with open(args.worker) as file:
+            config = json.load(file)
+        train(config)
+    else:
+        run_training(args)
 
 
 if __name__ == '__main__':

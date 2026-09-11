@@ -1,4 +1,4 @@
-"""Plain tabular Q-learning for coin-heaven, alone, without bombs."""
+"""Tabular Q-learning with legal movement action masking for coin-heaven."""
 
 from collections import deque
 from pathlib import Path
@@ -12,74 +12,73 @@ FEATURE_MODE = 'distance'
 
 
 def setup(self):
-    """Start a fresh training table or load a checkpoint for evaluation."""
+    """Start an empty table for training or load a frozen table for evaluation."""
     self.rng = np.random.default_rng(getattr(self, 'seed', None))
     self.model_path = MODEL_PATH if not hasattr(self, 'model_path') else Path(self.model_path)
-
     if self.train:
         if self.model_path.exists():
-            raise FileExistsError(f'Checkpoint already exists: {self.model_path}. Choose a new model_path for this training run.')
+            raise FileExistsError(f'Checkpoint already exists: {self.model_path}.')
         self.model_path.parent.mkdir(parents=True, exist_ok=True)
         self.q_table = {}
     else:
         if not self.model_path.is_file():
             raise FileNotFoundError(f'Trained model not found: {self.model_path}')
-        self.logger.info(f'Loading trained model from {self.model_path}.')
         with open(self.model_path, 'rb') as file:
             self.q_table = pickle.load(file)
 
 
 def act(self, game_state: dict) -> str:
-    """Explore during training; otherwise maximize Q with random tie-breaking."""
+    """Explore or exploit only actions that are legal in the current state."""
     if game_state is None:
         return 'WAIT'
     state = state_to_features(game_state)
     q_values = get_q_values(self, state)
+    legal = legal_action_indices(game_state)
     if self.train and self.rng.random() < self.epsilon:
-        return str(self.rng.choice(ACTIONS))
-    max_q = np.max(q_values)
-    best_actions = [action for action, q in zip(ACTIONS, q_values) if q == max_q]
-    return str(self.rng.choice(best_actions))
+        return str(self.rng.choice([ACTIONS[index] for index in legal]))
+    best_value = max(q_values[index] for index in legal)
+    best = [index for index in legal if q_values[index] == best_value]
+    return ACTIONS[int(self.rng.choice(best))]
+
+
+def legal_action_indices(game_state: dict):
+    """Return movement and WAIT indices that do not enter a wall or crate."""
+    field = game_state['field']
+    x, y = game_state['self'][3]
+    neighbours = [(x, y - 1), (x + 1, y), (x, y + 1), (x - 1, y)]
+    legal = []
+    for index, (nx, ny) in enumerate(neighbours):
+        if (0 <= nx < field.shape[0] and 0 <= ny < field.shape[1] and
+                field[nx, ny] == 0):
+            legal.append(index)
+    legal.append(ACTIONS.index('WAIT'))
+    return legal
 
 
 def state_to_features(game_state: dict):
-    """Encode position, local walls, and coarse nearest-coin information.
-
-    Coordinates use field[x, y]. The absolute position distinguishes locations
-    that previously shared one state and caused movement loops. The feature set
-    describes the situation; the Q-table still learns which action to choose.
-    """
+    """Encode local walls, nearest-coin direction, distance, and progress."""
     if game_state is None:
         return None
     field = game_state['field']
     x, y = game_state['self'][3]
-    up_blocked = y - 1 < 0 or field[x, y - 1] != 0
-    right_blocked = x + 1 >= field.shape[0] or field[x + 1, y] != 0
-    down_blocked = y + 1 >= field.shape[1] or field[x, y + 1] != 0
-    left_blocked = x - 1 < 0 or field[x - 1, y] != 0
-
+    blocked = (
+        int(y - 1 < 0 or field[x, y - 1] != 0),
+        int(x + 1 >= field.shape[0] or field[x + 1, y] != 0),
+        int(y + 1 >= field.shape[1] or field[x, y + 1] != 0),
+        int(x - 1 < 0 or field[x - 1, y] != 0),
+    )
     nearest = nearest_coin(field, (x, y), game_state['coins'])
-    coin_dx, coin_dy = 0, 0
-    coin_distance = 0
+    dx, dy, distance = 0, 0, 0
     if nearest is not None:
-        target, coin_distance = nearest
-        coin_dx = int(np.sign(target[0] - x))
-        coin_dy = int(np.sign(target[1] - y))
-    blocked = (int(up_blocked), int(right_blocked), int(down_blocked), int(left_blocked))
-    direction = (coin_dx, coin_dy)
-    if FEATURE_MODE == 'compact':
-        return blocked + direction
-    if FEATURE_MODE == 'position':
-        return (int(x), int(y)) + blocked + direction
-    if FEATURE_MODE == 'distance':
-        return blocked + direction + (distance_bucket(coin_distance),
-                                      remaining_coins_bucket(len(game_state['coins'])))
-    return ((int(x), int(y)) + blocked + direction +
-            (distance_bucket(coin_distance), remaining_coins_bucket(len(game_state['coins']))))
+        target, distance = nearest
+        dx = int(np.sign(target[0] - x))
+        dy = int(np.sign(target[1] - y))
+    return blocked + (dx, dy, distance_bucket(distance),
+                      remaining_coins_bucket(len(game_state['coins'])))
 
 
 def nearest_coin(field, position, coins):
-    """Find a nearest reachable coin and its maze distance by BFS."""
+    """Find a nearest reachable coin and its maze distance by breadth-first search."""
     coins = set(coins)
     if not coins:
         return None
@@ -101,7 +100,7 @@ def nearest_coin(field, position, coins):
 
 
 def distance_bucket(distance):
-    """Convert maze distance into a small discrete value for the Q-table."""
+    """Convert maze distance to a small discrete value."""
     if distance == 0:
         return 0
     if distance == 1:
@@ -116,7 +115,7 @@ def distance_bucket(distance):
 
 
 def remaining_coins_bucket(count):
-    """Convert remaining coin count into a small progress value."""
+    """Convert remaining coin count to a small progress value."""
     if count == 0:
         return 0
     if count <= 5:
@@ -129,7 +128,7 @@ def remaining_coins_bucket(count):
 
 
 def get_q_values(self, state):
-    """Return stored values, inserting unseen states only during training."""
+    """Return stored values, adding unseen states only during training."""
     if state not in self.q_table:
         if self.train:
             self.q_table[state] = np.zeros(len(ACTIONS))
