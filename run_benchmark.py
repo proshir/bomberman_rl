@@ -55,8 +55,17 @@ def play_game(config):
     starts = [agent.get_state()[-1] for agent in world.agents]
     coin_task = config['scenario'] == 'coin-heaven' and len(world.agents) == 1
     completion_steps = None
+    visited = set()
+    repeated_states = 0
     started = perf_counter()
     while world.running:
+        if coin_task:
+            position = world.agents[0].get_state()[-1]
+            coins = tuple(sorted(coin.get_state() for coin in world.coins if coin.collectable))
+            state = (position, coins)
+            if state in visited:
+                repeated_states += 1
+            visited.add(state)
         world.do_step()
         if (coin_task and completion_steps is None and
                 world.agents[0].statistics['coins'] == len(world.coins)):
@@ -74,9 +83,10 @@ def play_game(config):
             'kills': stats['kills'],
             'suicides': stats['suicides'],
             'steps': stats['steps'],
-            'dead': agent.dead,
+            'dead': agent.dead, 'invalid_actions': stats['invalid'],
         })
         if coin_task:
+            results[-1]['repeated_states'] = repeated_states
             results[-1]['completed'] = completion_steps is not None
             results[-1]['completion_steps'] = completion_steps
     world.end()
@@ -116,6 +126,10 @@ def summarize(results, candidates, metric, seeds, samples, seed):
             'board_means': values,
         }
         games = [game['agents'][0] for game in candidate_games]
+        for diagnostic in ('invalid_actions', 'repeated_states'):
+            if all(diagnostic in game for game in games):
+                summary['agents'][candidate]['mean_' + diagnostic] = float(
+                    np.mean([game[diagnostic] for game in games]))
         if all('completed' in game for game in games):
             completed = [game['completion_steps'] for game in games if game['completed']]
             summary['agents'][candidate].update({

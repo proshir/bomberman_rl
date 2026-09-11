@@ -19,11 +19,12 @@ from run_benchmark import BenchmarkWorld, SOURCE_DIR, save_json
 
 
 def evaluate(config, learner, episode, interactions):
-    """Save the current Q-table and evaluate it in separate game processes."""
+    """Save the current model and evaluate it in separate game processes."""
     directory = Path(config['output'])
     checkpoint = directory / 'checkpoints' / f'episode_{episode:04d}.pkl'
     with open(checkpoint, 'wb') as file:
-        pickle.dump(learner.q_table, file)
+        model = learner.weights if hasattr(learner, 'weights') else learner.q_table
+        pickle.dump(model, file)
     output = directory / 'evaluation' / f'episode_{episode:04d}'
     command = [
         sys.executable, str(SOURCE_DIR / 'run_benchmark.py'),
@@ -48,7 +49,7 @@ def evaluate(config, learner, episode, interactions):
 
 
 def train(config):
-    """Train one independent table and record each round and evaluation."""
+    """Train one independent agent and record each round and evaluation."""
     directory = Path(config['output'])
     callbacks = importlib.import_module(f"agent_code.{config['agent']}.callbacks")
     callbacks.MODEL_PATH = directory / 'training.pkl'
@@ -95,9 +96,12 @@ def train(config):
                 'score': agent.score,
                 'reward': learner.last_round_reward,
                 'epsilon': epsilon,
-                'table_size': len(learner.q_table),
                 'training_seconds': training_seconds,
             }
+            if hasattr(learner, 'weights'):
+                record['weight_count'] = learner.weights.size
+            else:
+                record['table_size'] = len(learner.q_table)
             file.write(json.dumps(record) + '\n')
             file.flush()
             if episode % config['eval_every'] == 0 or episode == config['rounds']:
@@ -107,7 +111,7 @@ def train(config):
 
 
 def parse_args(argv=None):
-    parser = ArgumentParser(description='Train and evaluate the coin Q-table agent.')
+    parser = ArgumentParser(description='Train and evaluate a coin agent.')
     parser.add_argument('--agent', default='q_table_agent')
     parser.add_argument('--feature-mode', choices=['compact', 'position', 'distance', 'rich'],
                         default='distance')
@@ -153,6 +157,9 @@ def run_training(args):
              SOURCE_DIR / 'settings.py', SOURCE_DIR / 'events.py',
              SOURCE_DIR / 'agent_code' / args.agent / 'callbacks.py',
              SOURCE_DIR / 'agent_code' / args.agent / 'train.py']
+    features_path = SOURCE_DIR / 'agent_code' / args.agent / 'features.py'
+    if features_path.is_file():
+        paths.append(features_path)
     config['source_hashes'] = {
         str(path.relative_to(SOURCE_DIR)): hashlib.sha256(path.read_bytes()).hexdigest()
         for path in paths
