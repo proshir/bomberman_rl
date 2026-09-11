@@ -87,6 +87,9 @@ def play_game(config):
         })
         if coin_task:
             results[-1]['repeated_states'] = repeated_states
+            policy = agent.backend.runner.fake_self
+            if hasattr(policy, 'loop_interventions'):
+                results[-1]['loop_interventions'] = policy.loop_interventions
             results[-1]['completed'] = completion_steps is not None
             results[-1]['completion_steps'] = completion_steps
     world.end()
@@ -126,7 +129,7 @@ def summarize(results, candidates, metric, seeds, samples, seed):
             'board_means': values,
         }
         games = [game['agents'][0] for game in candidate_games]
-        for diagnostic in ('invalid_actions', 'repeated_states'):
+        for diagnostic in ('invalid_actions', 'repeated_states', 'loop_interventions'):
             if all(diagnostic in game for game in games):
                 summary['agents'][candidate]['mean_' + diagnostic] = float(
                     np.mean([game[diagnostic] for game in games]))
