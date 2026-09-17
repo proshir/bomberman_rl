@@ -172,6 +172,8 @@ def parse_args(argv=None):
                         default='distance')
     parser.add_argument('--bootstrap-samples', type=int, default=2000)
     parser.add_argument('--analysis-seed', type=int, default=0)
+    parser.add_argument('--batch-size', type=int, default=1,
+                        help='Games evaluated in each worker process (default: 1).')
     parser.add_argument('--worker', type=Path, help=SUPPRESS)
     args = parser.parse_args(argv)
 
@@ -194,6 +196,8 @@ def parse_args(argv=None):
         parser.error('Output directory already exists.')
     if args.max_steps < 1:
         parser.error('The step limit must be positive.')
+    if args.batch_size < 1:
+        parser.error('--batch-size must be positive.')
 
     return args
 
@@ -206,36 +210,51 @@ def run_benchmark(args):
     saved_args['output'] = str(args.output)
     saved_args['model_path'] = model_path
     save_json(args.output / 'config.json', saved_args)
+    tasks = []
+    for seed in args.seeds:
+        for agent_seed in args.agent_seeds:
+            for seat in args.seats:
+                for candidate in args.agents:
+                    game_dir = args.output / 'games' / f'{len(tasks):04d}'
+                    game_dir.mkdir(parents=True)
+                    config = {
+                        'model_path': model_path,
+                        'feature_mode': args.feature_mode,
+                        'agents': [candidate] + args.opponents,
+                        'scenario': args.scenario,
+                        'seed': seed,
+                        'agent_seed': agent_seed,
+                        'seat': seat,
+                        'max_steps': args.max_steps,
+                        'log_dir': str(game_dir),
+                        'agent_log_dir': str(game_dir / 'agents'),
+                    }
+                    save_json(game_dir / 'config.json', config)
+                    tasks.append((game_dir, candidate, config))
+
     results = []
     with open(args.output / 'games.jsonl', 'w') as file:
-        for seed in tqdm(args.seeds):
-            for agent_seed in args.agent_seeds:
-                for seat in args.seats:
-                    for candidate in args.agents:
-                        game_dir = args.output / 'games' / f'{len(results):04d}'
-                        game_dir.mkdir(parents=True)
-                        config = {
-                            'model_path': model_path,
-                            'feature_mode': args.feature_mode,
-                            'agents': [candidate] + args.opponents,
-                            'scenario': args.scenario,
-                            'seed': seed,
-                            'agent_seed': agent_seed,
-                            'seat': seat,
-                            'max_steps': args.max_steps,
-                            'log_dir': str(game_dir),
-                            'agent_log_dir': str(game_dir / 'agents'),
-                        }
-                        config_path = game_dir / 'config.json'
-                        save_json(config_path, config)
-                        # A fresh process keeps settings and random state separate.
-                        command = [sys.executable, __file__, '--worker', str(config_path)]
-                        subprocess.run(command, check=True)
-                        with open(game_dir / 'result.json') as result_file:
-                            result = json.load(result_file)
-                        result['candidate'] = candidate
-                        file.write(json.dumps(result) + '\n')
-                        results.append(result)
+        batches = [tasks[start:start + args.batch_size]
+                   for start in range(0, len(tasks), args.batch_size)]
+        for index, batch in enumerate(tqdm(batches)):
+            batch_dir = args.output / 'batches'
+            batch_dir.mkdir(exist_ok=True)
+            batch_path = batch_dir / f'{index:04d}.json'
+            result_path = batch_dir / f'{index:04d}_results.json'
+            save_json(batch_path, {
+                'games': [config for _, _, config in batch],
+                'result_path': str(result_path),
+            })
+            command = [sys.executable, __file__, '--worker', str(batch_path)]
+            subprocess.run(command, check=True)
+            with open(result_path) as result_file:
+                batch_results = json.load(result_file)
+            if len(batch_results) != len(batch):
+                raise RuntimeError('Worker returned the wrong number of game results.')
+            for result, (_, candidate, _) in zip(batch_results, batch):
+                result['candidate'] = candidate
+                file.write(json.dumps(result) + '\n')
+                results.append(result)
     summary = summarize(results, args.agents, metric, args.seeds,
                         args.bootstrap_samples, args.analysis_seed)
     save_json(args.output / 'summary.json', summary)
@@ -249,8 +268,12 @@ def main(argv=None):
     if args.worker:
         with open(args.worker) as file:
             config = json.load(file)
-        result = play_game(config)
-        save_json(args.worker.parent / 'result.json', result)
+        if 'games' in config:
+            results = [play_game(game) for game in config['games']]
+            save_json(Path(config['result_path']), results)
+        else:
+            result = play_game(config)
+            save_json(args.worker.parent / 'result.json', result)
     else:
         run_benchmark(args)
 
