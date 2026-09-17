@@ -23,7 +23,10 @@ def evaluate(config, learner, episode, interactions):
     directory = Path(config['output'])
     checkpoint = directory / 'checkpoints' / f'episode_{episode:04d}.pkl'
     with open(checkpoint, 'wb') as file:
-        model = learner.weights if hasattr(learner, 'weights') else learner.q_table
+        if hasattr(learner, 'trees'):
+            model = learner.trees
+        else:
+            model = learner.weights if hasattr(learner, 'weights') else learner.q_table
         pickle.dump(model, file)
     output = directory / 'evaluation' / f'episode_{episode:04d}'
     command = [
@@ -98,7 +101,11 @@ def train(config):
                 'epsilon': epsilon,
                 'training_seconds': training_seconds,
             }
-            if hasattr(learner, 'weights'):
+            if hasattr(learner, 'trees'):
+                record['tree_nodes'] = sum(tree.tree_.node_count for tree in learner.trees
+                                           if tree is not None)
+                record['buffer_size'] = len(learner.transitions)
+            elif hasattr(learner, 'weights'):
                 record['weight_count'] = learner.weights.size
             else:
                 record['table_size'] = len(learner.q_table)
@@ -166,6 +173,9 @@ def run_training(args):
     }
     config['python'] = sys.version
     config['numpy'] = np.__version__
+    if args.agent == 'tree_fqi_agent':
+        import sklearn
+        config['sklearn'] = sklearn.__version__
     save_json(args.output / 'config.json', config)
     curve = []
     for index, seed in enumerate(args.seeds):
