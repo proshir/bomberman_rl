@@ -8,13 +8,14 @@ import numpy as np
 
 
 TransitionBatch = namedtuple(
-    "TransitionBatch", "states actions rewards next_states dones"
+    "TransitionBatch", "states actions rewards next_states dones next_action_masks"
 )
 
 
 class ReplayBuffer:
-    def __init__(self, capacity, seed=None):
+    def __init__(self, capacity, seed=None, n_actions=6):
         self.capacity = int(capacity)
+        self.n_actions = int(n_actions)
         self.storage = []
         self.position = 0
         self.rng = np.random.default_rng(seed)
@@ -22,13 +23,33 @@ class ReplayBuffer:
     def __len__(self):
         return len(self.storage)
 
-    def add(self, state, action, reward, next_state, done):
+    def add(self, state, action, reward, next_state, done,
+            next_action_mask=None):
+        """Store a transition and the actions allowed in its next state.
+
+        Terminal transitions have an empty mask.  The all-actions fallback is
+        kept for compatibility with small standalone callers; the combat DQN
+        always supplies the safety-filtered mask explicitly.
+        """
+        if next_action_mask is None:
+            next_action_mask = (
+                np.zeros(self.n_actions, dtype=bool)
+                if next_state is None or done
+                else np.ones(self.n_actions, dtype=bool)
+            )
+        next_action_mask = np.asarray(next_action_mask, dtype=bool).copy()
+        if next_action_mask.shape != (self.n_actions,):
+            raise ValueError(
+                f"next_action_mask must have shape ({self.n_actions},), "
+                f"got {next_action_mask.shape}"
+            )
         item = (
             np.asarray(state, dtype=np.float32).copy(),
             int(action),
             float(reward),
             None if next_state is None else np.asarray(next_state, dtype=np.float32).copy(),
             bool(done),
+            next_action_mask,
         )
         if len(self.storage) < self.capacity:
             self.storage.append(item)
@@ -41,7 +62,7 @@ class ReplayBuffer:
             raise ValueError("Not enough transitions in replay buffer.")
         indices = self.rng.choice(len(self.storage), batch_size, replace=False)
         rows = [self.storage[int(i)] for i in indices]
-        states, actions, rewards, next_states, dones = zip(*rows)
+        states, actions, rewards, next_states, dones, next_action_masks = zip(*rows)
         reference = states[0]
         next_states = [reference * 0 if state is None else state
                        for state in next_states]
@@ -51,4 +72,5 @@ class ReplayBuffer:
             np.asarray(rewards, dtype=np.float32),
             np.stack(next_states).astype(np.float32),
             np.asarray(dones, dtype=np.float32),
+            np.stack(next_action_masks).astype(bool),
         )

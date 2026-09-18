@@ -30,12 +30,26 @@ class QNetwork(nn.Module):
         return self.network(states)
 
 
-def vanilla_targets(target_net, next_states, rewards, dones, gamma):
-    """Use the target network for both max-action selection and evaluation."""
+def vanilla_targets(target_net, next_states, rewards, dones, gamma,
+                    next_action_masks):
+    """Compute masked vanilla-DQN targets with the target network.
+
+    The mask is the same safe/useful candidate set used by action selection.
+    A row with no candidate is treated as having zero bootstrap value; this
+    also keeps terminal rows numerically well-defined.
+    """
+    next_action_masks = next_action_masks.to(dtype=torch.bool)
     with torch.no_grad():
         next_q_values = target_net(next_states)
-        next_values = next_q_values.max(dim=1).values
-        return rewards + float(gamma) * (1.0 - dones) * next_values
+        masked_values = next_q_values.masked_fill(~next_action_masks, -torch.inf)
+        next_values, _ = masked_values.max(dim=1)
+        has_candidates = next_action_masks.any(dim=1)
+        bootstrap = torch.where(
+            (dones > 0) | ~has_candidates,
+            torch.zeros_like(next_values),
+            next_values,
+        )
+        return rewards + float(gamma) * (1.0 - dones) * bootstrap
 
 
 def save_checkpoint(learner, path):

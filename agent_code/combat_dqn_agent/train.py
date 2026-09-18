@@ -48,8 +48,13 @@ def optimize_model(self):
     rewards = torch.as_tensor(batch.rewards, dtype=torch.float32, device=DEVICE)
     next_states = torch.as_tensor(batch.next_states, dtype=torch.float32, device=DEVICE)
     dones = torch.as_tensor(batch.dones, dtype=torch.float32, device=DEVICE)
+    next_action_masks = torch.as_tensor(
+        batch.next_action_masks, dtype=torch.bool, device=DEVICE
+    )
     values = self.policy_net(states).gather(1, actions[:, None]).squeeze(1)
-    targets = vanilla_targets(self.target_net, next_states, rewards, dones, GAMMA)
+    targets = vanilla_targets(
+        self.target_net, next_states, rewards, dones, GAMMA, next_action_masks
+    )
     loss = F.smooth_l1_loss(values, targets)
     self.optimizer.zero_grad(set_to_none=True)
     loss.backward()
@@ -63,12 +68,43 @@ def optimize_model(self):
     return float(loss.detach().cpu().item())
 
 
-def remember(self, old_state, action, new_state, events):
+def _candidate_mask(game_state):
+    """Encode the exact action candidates used by ``callbacks.act``."""
+    candidates = safe_action_indices(game_state)
+    if not candidates:
+        candidates = best_survival_action_indices(game_state)
+    mask = np.zeros(len(ACTIONS), dtype=bool)
+    mask[candidates] = True
+    return mask
+
+
+def remember(self, old_state, action, new_state, events,
+             next_decision_state=None):
     reward = reward_from_transition(old_state, action, new_state, events)
-    future = None if new_state is None else next_features(self, old_state, action, new_state)
+    if new_state is None:
+        future = None
+        next_action_mask = np.zeros(len(ACTIONS), dtype=bool)
+    elif next_decision_state is not None:
+        # ``old_game_state`` in the following callback is the exact state that
+        # was passed to the next act() call.  Its feature cache therefore has
+        # the same step/history context as inference.
+        cached = self.feature_cache.get(state_key(next_decision_state))
+        if cached is None:
+            raise KeyError(
+                "next decision state was not cached before its transition "
+                "was committed"
+            )
+        future = cached[0]
+        next_action_mask = _candidate_mask(next_decision_state)
+    else:
+        # Compatibility fallback for direct callers that do not provide the
+        # following action-time state.  Normal framework callbacks use the
+        # exact cached state path above.
+        future = next_features(self, old_state, action, new_state)
+        next_action_mask = _candidate_mask(new_state)
     self.replay_buffer.add(
         self.feature_cache[state_key(old_state)][0], ACTIONS.index(action),
-        reward, future, new_state is None,
+        reward, future, new_state is None, next_action_mask,
     )
     self.env_steps += 1
     self.epsilon = _epsilon(self.env_steps)
@@ -84,7 +120,7 @@ def game_events_occurred(self, old_game_state, self_action, new_game_state, even
     if old_game_state is None or self_action is None:
         return
     if self.pending is not None:
-        remember(self, *self.pending)
+        remember(self, *self.pending, next_decision_state=old_game_state)
     self.pending = (old_game_state, self_action, new_game_state, list(events))
 
 
@@ -95,7 +131,11 @@ def end_of_round(self, last_game_state, last_action, events):
             last_game_state is not None and state_key(pending_state) == state_key(last_game_state)
         )
         if not pending_is_final:
-            remember(self, *self.pending)
+            if last_game_state is not None:
+                remember(self, *self.pending,
+                         next_decision_state=last_game_state)
+            else:
+                remember(self, *self.pending)
     if last_game_state is not None and last_action is not None:
         remember(self, last_game_state, last_action, None, list(events))
     self.pending = None
