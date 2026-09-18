@@ -25,19 +25,29 @@ from run_benchmark import BenchmarkWorld, SOURCE_DIR, save_json
 DEFAULT_AGENT = "combat_fqi_agent"
 
 
-def evaluate(config, learner, episode, interactions):
+def episode_scenario(config, episode):
+    """Return the environment used by one training episode."""
+    if config.get("curriculum") == "mixed":
+        return "coin-heaven" if episode % 2 else "loot-crate"
+    return config["scenario"]
+
+
+def evaluate(config, learner, episode, interactions, scenario):
     """Freeze the current trees and evaluate them in a fresh process."""
     directory = Path(config["output"])
     checkpoint = directory / "checkpoints" / f"episode_{episode:04d}.pkl"
     with open(checkpoint, "wb") as file:
         pickle.dump(learner.trees, file)
 
-    output = directory / "evaluation" / f"episode_{episode:04d}"
+    evaluation_root = directory / "evaluation"
+    if config.get("curriculum") == "mixed":
+        evaluation_root = evaluation_root / scenario
+    output = evaluation_root / f"episode_{episode:04d}"
     command = [
         sys.executable,
         str(SOURCE_DIR / "run_benchmark.py"),
         "--agents", config["agent"],
-        "--scenario", config["scenario"],
+        "--scenario", scenario,
         "--model-path", str(checkpoint),
         "--max-steps", str(config["max_steps"]),
         "--seeds", *map(str, config["eval_seeds"]),
@@ -49,7 +59,9 @@ def evaluate(config, learner, episode, interactions):
     ]
     if config["opponents"]:
         command.extend(["--opponents", *config["opponents"]])
-    output.parent.mkdir(exist_ok=True)
+    if config.get("diagnostics"):
+        command.append("--diagnostics")
+    output.parent.mkdir(parents=True, exist_ok=True)
     with open(output.with_suffix(".log"), "w") as log:
         subprocess.run(command, check=True, stdout=log, stderr=subprocess.STDOUT)
     with open(output / "summary.json") as file:
@@ -95,7 +107,10 @@ def train(config):
     world = BenchmarkWorld(args, lineup)
     learner = world.agents[0].backend.runner.fake_self
 
-    curve = [evaluate(config, learner, 0, 0)]
+    curve = [
+        evaluate(config, learner, 0, 0, scenario)
+        for scenario in config["evaluation_scenarios"]
+    ]
     save_json(directory / "learning_curve.json", curve)
     interactions = 0
     training_seconds = 0.0
@@ -105,6 +120,7 @@ def train(config):
             board_seed = config["board_start"] + episode - 1
             world.rng = np.random.default_rng(board_seed)
             args.seat = (episode - 1) % 4
+            args.scenario = episode_scenario(config, episode)
             epsilon = learner.epsilon
             started = perf_counter()
             world.new_round()
@@ -118,6 +134,7 @@ def train(config):
             record = {
                 "episode": episode,
                 "board_seed": board_seed,
+                "scenario": args.scenario,
                 "agent_seed": config["seed"],
                 "seat": args.seat,
                 "steps": world.step,
@@ -140,7 +157,10 @@ def train(config):
             file.write(json.dumps(record) + "\n")
             file.flush()
             if episode % config["eval_every"] == 0 or episode == config["rounds"]:
-                curve.append(evaluate(config, learner, episode, interactions))
+                curve.extend(
+                    evaluate(config, learner, episode, interactions, scenario)
+                    for scenario in config["evaluation_scenarios"]
+                )
                 save_json(directory / "learning_curve.json", curve)
     world.end()
 
@@ -151,6 +171,11 @@ def parse_args(argv=None):
     parser.add_argument("--scenario",
                         choices=["coin-heaven", "loot-crate", "classic"],
                         default="loot-crate")
+    parser.add_argument("--curriculum", choices=["none", "mixed"],
+                        default="none",
+                        help="Alternate Coin Heaven and loot-crate training rounds.")
+    parser.add_argument("--diagnostics", action="store_true",
+                        help="Record crate/coin progress diagnostics during evaluation.")
     parser.add_argument("--opponents", nargs="*", default=[])
     parser.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
     parser.add_argument("--rounds", type=int, default=300)
@@ -173,6 +198,8 @@ def parse_args(argv=None):
         parser.error("Choose a new --output directory.")
     if len(args.opponents) > 3:
         parser.error("At most three opponents are allowed.")
+    if args.curriculum == "mixed" and args.opponents:
+        parser.error("Mixed curriculum currently supports solo training only.")
     if not (SOURCE_DIR / "agent_code" / args.agent / "callbacks.py").is_file():
         parser.error(f"Unknown training agent: {args.agent}")
     if min(args.rounds, args.max_steps, args.eval_every) < 1:
@@ -195,6 +222,10 @@ def run_training(args):
     args.output.mkdir(parents=True)
     config = vars(args).copy()
     config["output"] = str(args.output)
+    config["evaluation_scenarios"] = (
+        ["coin-heaven", "loot-crate"]
+        if args.curriculum == "mixed" else [args.scenario]
+    )
     config["hyperparameters"] = {
         name: value for name, value in vars(train_module).items()
         if name.isupper() and isinstance(value, (int, float))

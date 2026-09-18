@@ -57,8 +57,51 @@ def play_game(config):
     completion_steps = None
     visited = set()
     repeated_states = 0
+    diagnostics_enabled = bool(config.get('diagnostics', False))
+    diagnostic_seen = set()
+    diagnostic_repeats = 0
+    diagnostic_last_progress_step = 0
+    diagnostic_max_no_progress = 0
+    diagnostic_progress_events = 0
+    diagnostic_last_coin_count = 0
+    diagnostic_initial_visible = 0
+    diagnostic_max_visible = 0
+    diagnostic_last_visible = 0
+    diagnostic_last_crates = 0
     started = perf_counter()
     while world.running:
+        if diagnostics_enabled:
+            agent = world.agents[0]
+            visible_coins = sum(coin.collectable for coin in world.coins)
+            visible_positions = tuple(sorted(
+                coin.get_state() for coin in world.coins if coin.collectable))
+            crate_count = int(np.count_nonzero(world.arena == 1))
+            diagnostic_state = (
+                tuple(agent.get_state()[-1]), visible_positions,
+                tuple(sorted(bomb.get_state() for bomb in world.bombs)),
+                crate_count,
+            )
+            if diagnostic_state in diagnostic_seen:
+                diagnostic_repeats += 1
+            diagnostic_seen.add(diagnostic_state)
+            if world.step == 0:
+                diagnostic_initial_visible = visible_coins
+                diagnostic_last_coin_count = agent.statistics['coins']
+                diagnostic_last_visible = visible_coins
+                diagnostic_last_crates = crate_count
+            diagnostic_max_visible = max(diagnostic_max_visible, visible_coins)
+            if (agent.statistics['coins'] > diagnostic_last_coin_count or
+                    visible_coins > diagnostic_last_visible or
+                    crate_count < diagnostic_last_crates):
+                diagnostic_last_progress_step = world.step
+                diagnostic_last_coin_count = agent.statistics['coins']
+                diagnostic_last_visible = visible_coins
+                diagnostic_last_crates = crate_count
+                diagnostic_progress_events += 1
+            diagnostic_max_no_progress = max(
+                diagnostic_max_no_progress,
+                world.step - diagnostic_last_progress_step,
+            )
         if coin_task:
             position = world.agents[0].get_state()[-1]
             coins = tuple(sorted(coin.get_state() for coin in world.coins if coin.collectable))
@@ -93,6 +136,15 @@ def play_game(config):
                 results[-1]['loop_interventions'] = policy.loop_interventions
             results[-1]['completed'] = completion_steps is not None
             results[-1]['completion_steps'] = completion_steps
+        if diagnostics_enabled:
+            results[-1].update({
+                'diagnostic_repeated_states': int(diagnostic_repeats),
+                'diagnostic_max_no_progress_steps': int(diagnostic_max_no_progress),
+                'diagnostic_progress_events': int(diagnostic_progress_events),
+                'diagnostic_initial_visible_coins': int(diagnostic_initial_visible),
+                'diagnostic_max_visible_coins': int(diagnostic_max_visible),
+                'diagnostic_final_visible_coins': int(diagnostic_last_visible),
+            })
     world.end()
     return {'seed': config['seed'], 'agent_seed': config['agent_seed'],
             'seat': config['seat'], 'steps': world.step,
@@ -144,6 +196,16 @@ def summarize(results, candidates, metric, seeds, samples, seed):
             if all(diagnostic in game for game in games):
                 summary['agents'][candidate]['mean_' + diagnostic] = float(
                     np.mean([game[diagnostic] for game in games]))
+        for diagnostic in (
+                'diagnostic_repeated_states',
+                'diagnostic_max_no_progress_steps',
+                'diagnostic_progress_events',
+                'diagnostic_initial_visible_coins',
+                'diagnostic_max_visible_coins',
+                'diagnostic_final_visible_coins'):
+            if all(diagnostic in game for game in games):
+                summary['agents'][candidate]['mean_' + diagnostic] = float(
+                    np.mean([game[diagnostic] for game in games]))
         if all('completed' in game for game in games):
             completed = [game['completion_steps'] for game in games if game['completed']]
             summary['agents'][candidate].update({
@@ -185,6 +247,8 @@ def parse_args(argv=None):
     parser.add_argument('--analysis-seed', type=int, default=0)
     parser.add_argument('--batch-size', type=int, default=1,
                         help='Games evaluated in each worker process (default: 1).')
+    parser.add_argument('--diagnostics', action='store_true',
+                        help='Record crate/coin progress and repeated-state diagnostics.')
     parser.add_argument('--worker', type=Path, help=SUPPRESS)
     args = parser.parse_args(argv)
 
@@ -237,6 +301,7 @@ def run_benchmark(args):
                         'agent_seed': agent_seed,
                         'seat': seat,
                         'max_steps': args.max_steps,
+                        'diagnostics': args.diagnostics,
                         'log_dir': str(game_dir),
                         'agent_log_dir': str(game_dir / 'agents'),
                     }
