@@ -68,6 +68,7 @@ def evaluate(config, learner, episode, interactions, scenario):
         result = json.load(file)["agents"][config["agent"]]
     return {
         "episode": episode,
+        "scenario": scenario,
         "interactions": interactions,
         "checkpoint": str(checkpoint),
         **result,

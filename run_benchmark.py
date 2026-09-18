@@ -67,12 +67,14 @@ def play_game(config):
     diagnostic_initial_visible = 0
     diagnostic_max_visible = 0
     diagnostic_last_visible = 0
+    diagnostic_current_visible = 0
     diagnostic_last_crates = 0
     started = perf_counter()
     while world.running:
         if diagnostics_enabled:
             agent = world.agents[0]
             visible_coins = sum(coin.collectable for coin in world.coins)
+            diagnostic_current_visible = visible_coins
             visible_positions = tuple(sorted(
                 coin.get_state() for coin in world.coins if coin.collectable))
             crate_count = int(np.count_nonzero(world.arena == 1))
@@ -143,7 +145,7 @@ def play_game(config):
                 'diagnostic_progress_events': int(diagnostic_progress_events),
                 'diagnostic_initial_visible_coins': int(diagnostic_initial_visible),
                 'diagnostic_max_visible_coins': int(diagnostic_max_visible),
-                'diagnostic_final_visible_coins': int(diagnostic_last_visible),
+                'diagnostic_final_visible_coins': int(diagnostic_current_visible),
             })
     world.end()
     return {'seed': config['seed'], 'agent_seed': config['agent_seed'],
