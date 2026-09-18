@@ -42,9 +42,6 @@ def setup_training(self):
     self.round_reward = 0.0
     self.round_steps = 0
     self.round_events = defaultdict(int)
-    self.round_loss_total = 0.0
-    self.round_loss_count = 0
-    self.last_round_average_loss = None
 
 
 def _epsilon_for_step(step):
@@ -81,8 +78,6 @@ def optimize_model(self):
     if self.optimizer_steps % TARGET_UPDATE_EVERY == 0:
         self.target_net.load_state_dict(self.policy_net.state_dict())
     self.last_loss = float(loss.detach().cpu().item())
-    self.round_loss_total = getattr(self, "round_loss_total", 0.0) + self.last_loss
-    self.round_loss_count = getattr(self, "round_loss_count", 0) + 1
     return self.last_loss
 
 
@@ -147,13 +142,7 @@ def end_of_round(self, last_game_state, last_action, events):
     self.last_round_reward = self.round_reward
     self.last_round_steps = self.round_steps
     self.last_round_events = dict(self.round_events)
-    self.last_round_average_loss = (
-        self.round_loss_total / self.round_loss_count
-        if self.round_loss_count else None
-    )
     save_checkpoint(self, self.model_path)
     self.round_reward = 0.0
     self.round_steps = 0
     self.round_events.clear()
-    self.round_loss_total = 0.0
-    self.round_loss_count = 0
