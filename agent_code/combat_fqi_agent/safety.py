@@ -22,6 +22,10 @@ MOVE_DELTAS = {
     "BOMB": (0, 0),
 }
 
+# Leave the new bomb's blast before the last movement opportunity.  The spare
+# step matters in combat, where another agent can temporarily block a route.
+BOMB_ESCAPE_MARGIN = 1
+
 
 def blast_tiles(field, position, power=None):
     """Return the tiles hit by a bomb at ``position``.
@@ -129,8 +133,33 @@ def bomb_value(game_state):
     return int(crates), int(opponents)
 
 
+def _opponent_reachability(game_state, horizon):
+    """Return tiles an opponent could occupy at each future step.
+
+    This is deliberately a possibility set rather than a prediction of the
+    opponent's policy.  A new bomb is rejected when every escape depends on a
+    tile that a nearby opponent could claim first under the framework's
+    randomized action order.
+    """
+    field = game_state["field"]
+    bomb_positions = {tuple(position) for position, _ in game_state["bombs"]}
+    reachable = {tuple(other[3]) for other in game_state["others"]}
+    schedule = {}
+    for time_step in range(1, horizon + 1):
+        following = set(reachable)
+        for x, y in reachable:
+            for dx, dy in ((0, -1), (1, 0), (0, 1), (-1, 0)):
+                position = x + dx, y + dy
+                if (_inside(field, position) and field[position] == 0 and
+                        position not in bomb_positions):
+                    following.add(position)
+        reachable = following
+        schedule[time_step] = frozenset(reachable)
+    return schedule
+
+
 def _tile_open_at(game_state, position, time_step, origin, left_origin,
-                  bombs):
+                  bombs, opponent_reachability=None):
     """Check static obstacles and bombs for one node of the escape search."""
     field = game_state["field"]
     if not _inside(field, position) or field[position] != 0:
@@ -142,6 +171,12 @@ def _tile_open_at(game_state, position, time_step, origin, left_origin,
         if position == origin and not left_origin:
             continue
         return False
+    if (opponent_reachability is not None and
+            position in opponent_reachability.get(time_step, ())):
+        # During the bomb-placement step, another agent cannot enter the tile
+        # that we still occupy.  Later route tiles can be claimed first.
+        if not (time_step == 1 and position == origin and not left_origin):
+            return False
     return True
 
 
@@ -158,21 +193,37 @@ def _search_after_action(game_state, action):
     horizon = latest_danger + 1
     own_blast = (set(blast_tiles(game_state["field"], origin))
                  if extra_bomb else set())
+    escape_margin = BOMB_ESCAPE_MARGIN if game_state["others"] else 0
+    escape_deadline = (
+        s.BOMB_TIMER + 1 - escape_margin if extra_bomb else None
+    )
+    opponent_reachability = (
+        _opponent_reachability(game_state, escape_deadline)
+        if extra_bomb and game_state["others"] else None
+    )
 
     if 1 in danger.get(start, ()):
         return False, 0, None
+    if not _tile_open_at(
+            game_state, start, 1, origin, left_origin, bombs,
+            opponent_reachability):
+        return False, 0, None
 
-    queue = deque([(start, 1, left_origin)])
-    visited = {(start, 1, left_origin)}
+    escaped_at = 1 if extra_bomb and start not in own_blast else None
+    queue = deque([(start, 1, left_origin, escaped_at)])
+    visited = {(start, 1, left_origin, escaped_at)}
     max_time = 1
-    escape_steps = None
     while queue:
-        position, time_step, has_left = queue.popleft()
+        position, time_step, has_left, escaped_at = queue.popleft()
         max_time = max(max_time, time_step)
-        if extra_bomb and position not in own_blast and escape_steps is None:
-            escape_steps = time_step - 1
         if time_step >= horizon:
-            return True, max_time, escape_steps
+            if not extra_bomb or escaped_at is not None:
+                return True, max_time, (
+                    escaped_at - 1 if escaped_at is not None else None
+                )
+            # The complete danger window has elapsed without reaching a
+            # timely escape.  Do not extend this failed path indefinitely.
+            continue
 
         x, y = position
         for dx, dy in ((0, 0), (0, -1), (1, 0), (0, 1), (-1, 0)):
@@ -180,15 +231,22 @@ def _search_after_action(game_state, action):
             next_time = time_step + 1
             next_left = has_left or next_position != origin
             if not _tile_open_at(game_state, next_position, next_time,
-                                 origin, next_left, bombs):
+                                 origin, next_left, bombs,
+                                 opponent_reachability
+                                 if escaped_at is None else None):
                 continue
             if next_time in danger.get(next_position, ()):
                 continue
-            node = (next_position, next_time, next_left)
+            next_escaped_at = escaped_at
+            if (extra_bomb and next_escaped_at is None and
+                    next_position not in own_blast and
+                    next_time <= escape_deadline):
+                next_escaped_at = next_time
+            node = (next_position, next_time, next_left, next_escaped_at)
             if node not in visited:
                 visited.add(node)
                 queue.append(node)
-    return False, max_time, escape_steps
+    return False, max_time, None
 
 
 def can_survive_action(game_state, action):

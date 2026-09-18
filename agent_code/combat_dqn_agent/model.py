@@ -1,4 +1,4 @@
-"""Small vanilla-DQN network and checkpoint helpers."""
+"""Small DQN network, target, and checkpoint helpers."""
 
 # Sahand was here.
 
@@ -30,19 +30,33 @@ class QNetwork(nn.Module):
         return self.network(states)
 
 
-def vanilla_targets(target_net, next_states, rewards, dones, gamma,
-                    next_action_masks):
-    """Compute masked vanilla-DQN targets with the target network.
+def dqn_targets(policy_net, target_net, next_states, rewards, dones, gamma,
+                next_action_masks, algorithm="dqn"):
+    """Compute masked vanilla- or Double-DQN targets.
 
     The mask is the same safe/useful candidate set used by action selection.
     A row with no candidate is treated as having zero bootstrap value; this
     also keeps terminal rows numerically well-defined.
     """
+    algorithm = algorithm.strip().lower()
+    if algorithm not in {"dqn", "ddqn", "double_dqn"}:
+        raise ValueError(
+            "algorithm must be 'dqn', 'ddqn', or 'double_dqn', "
+            f"not {algorithm!r}"
+        )
     next_action_masks = next_action_masks.to(dtype=torch.bool)
     with torch.no_grad():
-        next_q_values = target_net(next_states)
-        masked_values = next_q_values.masked_fill(~next_action_masks, -torch.inf)
-        next_values, _ = masked_values.max(dim=1)
+        target_next_q = target_net(next_states)
+        selection_q = (
+            target_next_q
+            if algorithm == "dqn"
+            else policy_net(next_states)
+        )
+        masked_selection_q = selection_q.masked_fill(
+            ~next_action_masks, -torch.inf
+        )
+        best_actions = masked_selection_q.argmax(dim=1, keepdim=True)
+        next_values = target_next_q.gather(1, best_actions).squeeze(1)
         has_candidates = next_action_masks.any(dim=1)
         bootstrap = torch.where(
             (dones > 0) | ~has_candidates,
@@ -50,6 +64,15 @@ def vanilla_targets(target_net, next_states, rewards, dones, gamma,
             next_values,
         )
         return rewards + float(gamma) * (1.0 - dones) * bootstrap
+
+
+def vanilla_targets(target_net, next_states, rewards, dones, gamma,
+                    next_action_masks):
+    """Keep the original target helper available for existing callers."""
+    return dqn_targets(
+        target_net, target_net, next_states, rewards, dones, gamma,
+        next_action_masks, algorithm="dqn",
+    )
 
 
 def save_checkpoint(learner, path):

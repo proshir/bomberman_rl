@@ -1,6 +1,13 @@
-"""Small vanilla-DQN defaults."""
+"""Small DQN defaults."""
 
 # Sahand was here.
+
+import os
+
+
+# Keep vanilla DQN as the default.  The environment override makes matched
+# DQN/DDQN experiment runs possible without editing this file between runs.
+ALGORITHM = os.environ.get("BOMBERMAN_DQN_ALGORITHM", "dqn")
 
 GAMMA = 0.99
 LEARNING_RATE = 1e-4

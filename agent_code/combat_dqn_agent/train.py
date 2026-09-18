@@ -1,4 +1,4 @@
-"""Training callbacks for the minimal vanilla DQN."""
+"""Training callbacks shared by vanilla DQN and Double DQN."""
 
 # Sahand was here.
 
@@ -13,12 +13,12 @@ import events as e
 from agent_code.combat_fqi_history_antistag_agent.train import reward_from_transition
 from .callbacks import next_features, save_checkpoint, state_key
 from .config import (
-    BATCH_SIZE, EPSILON_DECAY_STEPS, EPSILON_END, EPSILON_START, GAMMA,
+    ALGORITHM, BATCH_SIZE, EPSILON_DECAY_STEPS, EPSILON_END, EPSILON_START, GAMMA,
     GRADIENT_CLIP_NORM, REPLAY_CAPACITY, TARGET_UPDATE_EVERY, TRAIN_EVERY,
     WARMUP_TRANSITIONS,
 )
 from .features import ACTIONS
-from .model import DEVICE, vanilla_targets
+from .model import DEVICE, dqn_targets
 from .replay import ReplayBuffer
 from .safety import best_survival_action_indices, safe_action_indices
 
@@ -52,8 +52,9 @@ def optimize_model(self):
         batch.next_action_masks, dtype=torch.bool, device=DEVICE
     )
     values = self.policy_net(states).gather(1, actions[:, None]).squeeze(1)
-    targets = vanilla_targets(
-        self.target_net, next_states, rewards, dones, GAMMA, next_action_masks
+    targets = dqn_targets(
+        self.policy_net, self.target_net, next_states, rewards, dones, GAMMA,
+        next_action_masks, algorithm=ALGORITHM,
     )
     loss = F.smooth_l1_loss(values, targets)
     self.optimizer.zero_grad(set_to_none=True)

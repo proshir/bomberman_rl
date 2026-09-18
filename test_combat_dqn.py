@@ -1,4 +1,4 @@
-"""Basic tests for the minimal vanilla DQN."""
+"""Basic tests for the minimal DQN implementations."""
 
 # Sahand was here.
 
@@ -16,11 +16,22 @@ from agent_code.combat_dqn_agent import train as dqn_train
 from agent_code.combat_dqn_agent import callbacks as dqn_callbacks
 from agent_code.combat_dqn_agent.config import N_ACTIONS
 from agent_code.combat_dqn_agent.features import ACTIONS
-from agent_code.combat_dqn_agent.model import QNetwork, save_checkpoint, vanilla_targets
+from agent_code.combat_dqn_agent.model import (
+    QNetwork, dqn_targets, save_checkpoint, vanilla_targets,
+)
 from agent_code.combat_dqn_agent.replay import ReplayBuffer
 
 
 class VanillaDQNTest(unittest.TestCase):
+    @staticmethod
+    def _constant_network(values):
+        network = QNetwork(2, len(values))
+        with torch.no_grad():
+            for parameter in network.parameters():
+                parameter.zero_()
+            network.network[-1].bias[:] = torch.tensor(values)
+        return network
+
     def test_replay_is_bounded(self):
         replay = ReplayBuffer(2, seed=0)
         for index in range(3):
@@ -46,6 +57,51 @@ class VanillaDQNTest(unittest.TestCase):
         self.assertAlmostEqual(values[0].item(), 2.98, places=5)
         self.assertAlmostEqual(values[1].item(), 3.0, places=5)
         self.assertFalse(values.requires_grad)
+
+    def test_vanilla_and_double_dqn_use_their_respective_selectors(self):
+        policy = self._constant_network([9.0, 1.0, 8.0])
+        target = self._constant_network([2.0, 5.0, 4.0])
+        states = torch.zeros((2, 2))
+        rewards = torch.zeros(2)
+        dones = torch.zeros(2)
+        masks = torch.tensor([
+            [True, True, True],
+            [False, True, True],
+        ])
+
+        vanilla = dqn_targets(
+            policy, target, states, rewards, dones, 1.0, masks,
+            algorithm="dqn",
+        )
+        double = dqn_targets(
+            policy, target, states, rewards, dones, 1.0, masks,
+            algorithm="double_dqn",
+        )
+
+        # Vanilla selects target-network maxima: action 1 in both rows.
+        torch.testing.assert_close(vanilla, torch.tensor([5.0, 5.0]))
+        # DDQN selects with policy (actions 0 and 2), then evaluates via target.
+        torch.testing.assert_close(double, torch.tensor([2.0, 4.0]))
+        self.assertEqual(vanilla.shape, rewards.shape)
+        self.assertEqual(double.shape, rewards.shape)
+        self.assertFalse(vanilla.requires_grad)
+        self.assertFalse(double.requires_grad)
+
+    def test_terminal_transitions_never_bootstrap_in_either_mode(self):
+        policy = self._constant_network([9.0, 1.0])
+        target = self._constant_network([2.0, 5.0])
+        states = torch.zeros((2, 2))
+        rewards = torch.tensor([3.0, -2.0])
+        dones = torch.ones(2)
+        masks = torch.tensor([[True, True], [False, False]])
+
+        for algorithm in ("dqn", "ddqn"):
+            values = dqn_targets(
+                policy, target, states, rewards, dones, 0.99, masks,
+                algorithm=algorithm,
+            )
+            torch.testing.assert_close(values, rewards)
+            self.assertEqual(values.shape, (2,))
 
     def test_network_shape(self):
         self.assertEqual(tuple(QNetwork(32, N_ACTIONS)(torch.zeros(3, 32)).shape), (3, 6))
