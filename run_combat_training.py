@@ -158,7 +158,7 @@ def train(config):
                 "buffer_size": len(getattr(learner, "transitions", [])),
                 "replay_buffer_size": len(getattr(learner, "replay_buffer", [])),
                 "optimizer_steps": int(getattr(learner, "optimizer_steps", 0)),
-                "average_loss": getattr(learner, "last_loss", None),
+                "average_loss": getattr(learner, "last_round_average_loss", None),
                 "tree_nodes": sum(tree.tree_.node_count for tree in
                                   getattr(learner, "trees", []) if tree is not None),
                 "training_seconds": training_seconds,
