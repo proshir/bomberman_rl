@@ -33,9 +33,11 @@ def evaluate(config, learner, episode, interactions):
         sys.executable, str(SOURCE_DIR / 'run_benchmark.py'),
         '--agents', config['agent'], '--scenario', 'coin-heaven',
         '--feature-mode', config['feature_mode'],
-        '--model-path', str(checkpoint), '--max-steps', str(config['max_steps']),
+        '--model-path', str(checkpoint), '--max-steps',
+        str(config.get('eval_max_steps') or config['max_steps']),
         '--seeds', *map(str, config['eval_seeds']),
         '--agent-seeds', '0', '--seats', '0', '1', '2', '3',
+        '--batch-size', str(4 * len(config['eval_seeds'])),
         '--output', str(output),
     ]
     output.parent.mkdir(exist_ok=True)
@@ -125,6 +127,8 @@ def parse_args(argv=None):
     parser.add_argument('--seeds', type=int, nargs='+', default=[0, 1, 2])
     parser.add_argument('--rounds', type=int, default=300)
     parser.add_argument('--max-steps', type=int, default=100)
+    parser.add_argument('--eval-max-steps', type=int,
+                        help='Optional step limit for checkpoint evaluations.')
     parser.add_argument('--eval-every', type=int, default=100)
     parser.add_argument('--eval-seeds', type=int, nargs='+', default=list(range(10000, 10008)))
     parser.add_argument('--output', type=Path)
@@ -136,6 +140,8 @@ def parse_args(argv=None):
         parser.error('Choose a new --output directory.')
     if min(args.rounds, args.max_steps, args.eval_every) < 1:
         parser.error('Round counts and step limits must be positive.')
+    if args.eval_max_steps is not None and args.eval_max_steps < 1:
+        parser.error('--eval-max-steps must be positive.')
     for seeds in (args.seeds, args.eval_seeds):
         if len(set(seeds)) != len(seeds):
             parser.error('Seeds must be unique within each list.')
