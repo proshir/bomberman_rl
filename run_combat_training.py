@@ -86,6 +86,10 @@ def train(config):
     callbacks = importlib.import_module(
         f"agent_code.{config['agent']}.callbacks")
     callbacks.MODEL_PATH = directory / "training.pkl"
+    callbacks.RESUME_PATH = (
+        Path(config["resume_checkpoint"]).resolve()
+        if config.get("resume_checkpoint") else None
+    )
     s.MAX_STEPS = config["max_steps"]
     s.LOG_GAME = s.LOG_AGENT_WRAPPER = s.LOG_AGENT_CODE = logging.WARNING
     random.seed(config["seed"])
@@ -114,23 +118,34 @@ def train(config):
         log_dir=str(directory / "logs"),
         agent_log_dir=str(directory / "logs" / "agents"),
     )
-    (directory / "checkpoints").mkdir()
-    (directory / "logs").mkdir()
+    (directory / "checkpoints").mkdir(exist_ok=True)
+    (directory / "logs").mkdir(exist_ok=True)
     lineup = [(config["agent"], True)] + [
         (name, False) for name in config["opponents"]
     ]
     world = BenchmarkWorld(args, lineup)
     learner = world.agents[0].backend.runner.fake_self
 
-    curve = [
-        evaluate(config, learner, 0, 0, scenario)
-        for scenario in config["evaluation_scenarios"]
-    ]
-    save_json(directory / "learning_curve.json", curve)
-    interactions = 0
+    start_episode = int(config.get("start_episode", 0))
+    curve_path = directory / "learning_curve.json"
+    if start_episode and curve_path.is_file():
+        with open(curve_path) as file:
+            curve = json.load(file)
+    else:
+        curve = [
+            evaluate(config, learner, 0, 0, scenario)
+            for scenario in config["evaluation_scenarios"]
+        ]
+        save_json(curve_path, curve)
+    # A resumed checkpoint carries the interaction counter.  This preserves
+    # epsilon/training progress in logs even though the current checkpoint
+    # format does not serialize the replay buffer itself.
+    interactions = int(getattr(learner, "env_steps", 0))
     training_seconds = 0.0
-    with open(directory / "rounds.jsonl", "w") as file:
-        for episode in tqdm(range(1, config["rounds"] + 1),
+    rounds_path = directory / "rounds.jsonl"
+    mode = "a" if start_episode and rounds_path.is_file() else "w"
+    with open(rounds_path, mode) as file:
+        for episode in tqdm(range(start_episode + 1, config["rounds"] + 1),
                             desc=f"{config['agent']} seed {config['seed']}"):
             board_seed = config["board_start"] + episode - 1
             world.rng = np.random.default_rng(board_seed)
@@ -207,13 +222,23 @@ def parse_args(argv=None):
         "--parallel-seeds", action="store_true",
         help="Train independent seeds concurrently on multi-core CPU hosts.",
     )
+    parser.add_argument(
+        "--resume", action="store_true",
+        help=("Continue an existing output directory from its latest per-seed "
+              "checkpoint; --rounds is the target total episode count."),
+    )
     parser.add_argument("--output", type=Path)
     parser.add_argument("--worker", type=Path, help=SUPPRESS)
     args = parser.parse_args(argv)
     if args.worker:
         return args
-    if args.output is None or args.output.exists():
-        parser.error("Choose a new --output directory.")
+    if args.output is None:
+        parser.error("Choose an --output directory.")
+    if args.resume:
+        if not args.output.is_dir():
+            parser.error("--resume requires an existing --output directory.")
+    elif args.output.exists():
+        parser.error("Choose a new --output directory, or pass --resume.")
     if len(args.opponents) > 3:
         parser.error("At most three opponents are allowed.")
     if args.curriculum == "mixed" and args.opponents:
@@ -237,9 +262,32 @@ def parse_args(argv=None):
 def run_training(args):
     train_module = importlib.import_module(f"agent_code.{args.agent}.train")
     args.output = args.output.resolve()
-    args.output.mkdir(parents=True)
+    previous_config = {}
+    if args.resume:
+        config_path = args.output / "config.json"
+        if not config_path.is_file():
+            raise FileNotFoundError(
+                f"Cannot resume {args.output}: missing config.json"
+            )
+        with open(config_path) as file:
+            previous_config = json.load(file)
+        for name in ("agent", "scenario", "curriculum", "opponents"):
+            if name in previous_config and getattr(args, name) != previous_config[name]:
+                raise ValueError(
+                    f"--resume configuration mismatch for {name}: "
+                    f"requested {getattr(args, name)!r}, "
+                    f"existing {previous_config[name]!r}"
+                )
+        if "seeds" in previous_config and set(args.seeds) != set(previous_config["seeds"]):
+            raise ValueError(
+                "--resume requires the same training seed list as the existing run"
+            )
+    else:
+        args.output.mkdir(parents=True)
     config = vars(args).copy()
     config["output"] = str(args.output)
+    if args.resume:
+        config["resumed_from_rounds"] = previous_config.get("rounds")
     config["evaluation_scenarios"] = (
         ["coin-heaven", "loot-crate"]
         if args.curriculum == "mixed" else [args.scenario]
@@ -308,11 +356,44 @@ def run_training(args):
     jobs = []
     for index, seed in enumerate(args.seeds):
         directory = args.output / f"seed_{seed}"
-        directory.mkdir()
+        if args.resume:
+            if not directory.is_dir():
+                raise FileNotFoundError(
+                    f"Cannot resume seed {seed}: missing {directory}"
+                )
+            checkpoints = sorted(directory.glob("checkpoints/episode_*.pkl"))
+            if not checkpoints:
+                raise FileNotFoundError(
+                    f"Cannot resume seed {seed}: no episode checkpoint found"
+                )
+            checkpoint = checkpoints[-1]
+            try:
+                checkpoint_episode = int(checkpoint.stem.rsplit("_", 1)[1])
+            except (IndexError, ValueError) as error:
+                raise ValueError(
+                    f"Invalid episode checkpoint filename: {checkpoint}"
+                ) from error
+            if checkpoint_episode >= args.rounds:
+                raise ValueError(
+                    f"Seed {seed} is already at episode {checkpoint_episode}; "
+                    f"--rounds must be larger than the checkpoint episode."
+                )
+            with open(directory / "config.json") as file:
+                previous_seed_config = json.load(file)
+        else:
+            directory.mkdir()
+            checkpoint = None
+            checkpoint_episode = 0
+            previous_seed_config = {}
         run_config = config.copy()
         run_config["seed"] = seed
         run_config["output"] = str(directory)
-        run_config["board_start"] = 4000 + index * args.rounds
+        run_config["board_start"] = previous_seed_config.get(
+            "board_start", 4000 + index * args.rounds
+        )
+        run_config["start_episode"] = checkpoint_episode
+        if checkpoint is not None:
+            run_config["resume_checkpoint"] = str(checkpoint.resolve())
         config_path = directory / "config.json"
         save_json(config_path, run_config)
         command = [sys.executable, str(Path(__file__).resolve()),

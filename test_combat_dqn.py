@@ -79,6 +79,30 @@ class VanillaDQNTest(unittest.TestCase):
         self.assertIn("optimizer_state_dict", payload)
         self.assertEqual(payload["env_steps"], 4)
 
+    def test_training_setup_resumes_checkpoint_state(self):
+        policy = QNetwork(32, N_ACTIONS)
+        source = SimpleNamespace(
+            policy_net=policy, target_net=QNetwork(32, N_ACTIONS),
+            optimizer=optim.Adam(policy.parameters()), epsilon=0.25,
+            env_steps=123, optimizer_steps=17,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "episode_0007.pkl"
+            save_checkpoint(source, checkpoint)
+            learner = SimpleNamespace(
+                train=True, seed=0,
+                model_path=Path(directory) / "training.pkl",
+            )
+            previous_resume_path = dqn_callbacks.RESUME_PATH
+            dqn_callbacks.RESUME_PATH = checkpoint
+            try:
+                dqn_callbacks.setup(learner)
+            finally:
+                dqn_callbacks.RESUME_PATH = previous_resume_path
+        self.assertEqual(learner.env_steps, 123)
+        self.assertEqual(learner.optimizer_steps, 17)
+        self.assertAlmostEqual(learner.epsilon, 0.25)
+
     def test_optimizer_update(self):
         learner = SimpleNamespace(
             policy_net=QNetwork(4, N_ACTIONS), target_net=QNetwork(4, N_ACTIONS),

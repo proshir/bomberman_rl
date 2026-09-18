@@ -18,6 +18,8 @@ from .safety import best_survival_action_indices, safe_action_indices
 
 
 MODEL_PATH = Path(__file__).resolve().parent / "dqn_checkpoint.pt"
+# The training runner sets this only when continuing an existing run.
+RESUME_PATH = None
 
 
 def state_key(game_state):
@@ -75,7 +77,20 @@ def setup(self):
     self.env_steps = 0
     self.optimizer_steps = 0
     if self.train:
-        if self.model_path.exists():
+        resume_path = Path(RESUME_PATH) if RESUME_PATH is not None else None
+        if resume_path is not None:
+            checkpoint = load_checkpoint(resume_path)
+            if int(checkpoint["input_dim"]) != self.policy_net.input_dim:
+                raise ValueError("DQN checkpoint feature dimension does not match.")
+            if int(checkpoint.get("n_actions", N_ACTIONS)) != N_ACTIONS:
+                raise ValueError("DQN checkpoint action dimension does not match.")
+            self.policy_net.load_state_dict(checkpoint["policy_state_dict"])
+            self.target_net.load_state_dict(checkpoint["target_state_dict"])
+            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            self.epsilon = float(checkpoint.get("epsilon", EPSILON_END))
+            self.env_steps = int(checkpoint.get("env_steps", 0))
+            self.optimizer_steps = int(checkpoint.get("optimizer_steps", 0))
+        elif self.model_path.exists():
             raise FileExistsError(f"Checkpoint already exists: {self.model_path}")
         self.model_path.parent.mkdir(parents=True, exist_ok=True)
     else:
@@ -148,4 +163,7 @@ def act(self, game_state):
     return ACTIONS[choice]
 
 
-__all__ = ["MODEL_PATH", "act", "next_features", "save_checkpoint", "setup", "state_key"]
+__all__ = [
+    "MODEL_PATH", "RESUME_PATH", "act", "next_features", "save_checkpoint",
+    "setup", "state_key",
+]
