@@ -242,12 +242,21 @@ def run_training(args):
         SOURCE_DIR / "agent_code" / args.agent / "safety.py",
         SOURCE_DIR / "agent_code" / args.agent / "train.py",
     ]
-    if args.agent == "combat_fqi_history_antistag_agent":
-        # The variant intentionally imports the already audited combat feature
-        # and safety implementation; hash those dependencies for provenance.
+    if args.agent in {
+        "combat_fqi_history_antistag_agent",
+        "combat_fqi_history_antistag_topology_agent",
+    }:
+        # These variants intentionally import the already audited combat
+        # feature and safety implementations; hash those dependencies for
+        # provenance.
         source_paths.extend([
             SOURCE_DIR / "agent_code" / "combat_fqi_agent" / "features.py",
             SOURCE_DIR / "agent_code" / "combat_fqi_agent" / "safety.py",
+        ])
+    if args.agent == "combat_fqi_history_antistag_topology_agent":
+        source_paths.extend([
+            SOURCE_DIR / "agent_code" / "combat_fqi_history_antistag_agent" / "features.py",
+            SOURCE_DIR / "agent_code" / "combat_fqi_history_antistag_agent" / "safety.py",
         ])
     config["source_hashes"] = {
         str(path.relative_to(SOURCE_DIR)): hashlib.sha256(path.read_bytes()).hexdigest()
