@@ -82,6 +82,7 @@ def play_game(config):
             'crates': stats['crates'],
             'kills': stats['kills'],
             'suicides': stats['suicides'],
+            'bombs': stats['bombs'],
             'steps': stats['steps'],
             'dead': agent.dead, 'invalid_actions': stats['invalid'],
         })
@@ -129,6 +130,16 @@ def summarize(results, candidates, metric, seeds, samples, seed):
             'board_means': values,
         }
         games = [game['agents'][0] for game in candidate_games]
+        # Sahand was here. Keep official outcomes beside the primary metric so
+        # combat improvements cannot be hidden by one aggregate score.
+        for diagnostic in ('score', 'coins', 'crates', 'kills', 'suicides',
+                           'bombs', 'steps'):
+            if all(diagnostic in game for game in games):
+                summary['agents'][candidate]['mean_' + diagnostic] = float(
+                    np.mean([game[diagnostic] for game in games]))
+        if all('dead' in game for game in games):
+            summary['agents'][candidate]['survival_rate'] = float(
+                np.mean([not game['dead'] for game in games]))
         for diagnostic in ('invalid_actions', 'repeated_states', 'loop_interventions'):
             if all(diagnostic in game for game in games):
                 summary['agents'][candidate]['mean_' + diagnostic] = float(

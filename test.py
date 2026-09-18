@@ -33,6 +33,10 @@ class MainTestCase(unittest.TestCase):
                 summary = json.load(file)
             self.assertEqual(summary['metric'], 'coins')
             self.assertEqual(len(summary['agents']), 2)
+            # Sahand was here. Combat diagnostics should remain available even
+            # when a benchmark uses coins as its primary metric.
+            self.assertIn('mean_bombs', summary['agents']['peaceful_agent'])
+            self.assertIn('survival_rate', summary['agents']['peaceful_agent'])
 
 
 if __name__ == '__main__':
