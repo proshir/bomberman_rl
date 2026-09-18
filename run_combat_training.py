@@ -22,7 +22,7 @@ import settings as s
 from run_benchmark import BenchmarkWorld, SOURCE_DIR, save_json
 
 
-AGENT = "combat_fqi_agent"
+DEFAULT_AGENT = "combat_fqi_agent"
 
 
 def evaluate(config, learner, episode, interactions):
@@ -36,7 +36,7 @@ def evaluate(config, learner, episode, interactions):
     command = [
         sys.executable,
         str(SOURCE_DIR / "run_benchmark.py"),
-        "--agents", AGENT,
+        "--agents", config["agent"],
         "--scenario", config["scenario"],
         "--model-path", str(checkpoint),
         "--max-steps", str(config["max_steps"]),
@@ -53,7 +53,7 @@ def evaluate(config, learner, episode, interactions):
     with open(output.with_suffix(".log"), "w") as log:
         subprocess.run(command, check=True, stdout=log, stderr=subprocess.STDOUT)
     with open(output / "summary.json") as file:
-        result = json.load(file)["agents"][AGENT]
+        result = json.load(file)["agents"][config["agent"]]
     return {
         "episode": episode,
         "interactions": interactions,
@@ -65,7 +65,8 @@ def evaluate(config, learner, episode, interactions):
 def train(config):
     """Run one independent training seed and preserve every round."""
     directory = Path(config["output"])
-    callbacks = importlib.import_module(f"agent_code.{AGENT}.callbacks")
+    callbacks = importlib.import_module(
+        f"agent_code.{config['agent']}.callbacks")
     callbacks.MODEL_PATH = directory / "training.pkl"
     s.MAX_STEPS = config["max_steps"]
     s.LOG_GAME = s.LOG_AGENT_WRAPPER = s.LOG_AGENT_CODE = logging.WARNING
@@ -88,7 +89,9 @@ def train(config):
     )
     (directory / "checkpoints").mkdir()
     (directory / "logs").mkdir()
-    lineup = [(AGENT, True)] + [(name, False) for name in config["opponents"]]
+    lineup = [(config["agent"], True)] + [
+        (name, False) for name in config["opponents"]
+    ]
     world = BenchmarkWorld(args, lineup)
     learner = world.agents[0].backend.runner.fake_self
 
@@ -98,7 +101,7 @@ def train(config):
     training_seconds = 0.0
     with open(directory / "rounds.jsonl", "w") as file:
         for episode in tqdm(range(1, config["rounds"] + 1),
-                            desc=f"Combat seed {config['seed']}"):
+                            desc=f"{config['agent']} seed {config['seed']}"):
             board_seed = config["board_start"] + episode - 1
             world.rng = np.random.default_rng(board_seed)
             args.seat = (episode - 1) % 4
@@ -144,7 +147,9 @@ def train(config):
 
 def parse_args(argv=None):
     parser = ArgumentParser(description=__doc__)
-    parser.add_argument("--scenario", choices=["loot-crate", "classic"],
+    parser.add_argument("--agent", default=DEFAULT_AGENT)
+    parser.add_argument("--scenario",
+                        choices=["coin-heaven", "loot-crate", "classic"],
                         default="loot-crate")
     parser.add_argument("--opponents", nargs="*", default=[])
     parser.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
@@ -155,6 +160,10 @@ def parse_args(argv=None):
                         default=list(range(30000, 30008)))
     parser.add_argument("--eval-seats", type=int, nargs="+", choices=range(4),
                         default=[0, 1, 2, 3])
+    parser.add_argument(
+        "--parallel-seeds", action="store_true",
+        help="Train independent seeds concurrently on multi-core CPU hosts.",
+    )
     parser.add_argument("--output", type=Path)
     parser.add_argument("--worker", type=Path, help=SUPPRESS)
     args = parser.parse_args(argv)
@@ -164,6 +173,8 @@ def parse_args(argv=None):
         parser.error("Choose a new --output directory.")
     if len(args.opponents) > 3:
         parser.error("At most three opponents are allowed.")
+    if not (SOURCE_DIR / "agent_code" / args.agent / "callbacks.py").is_file():
+        parser.error(f"Unknown training agent: {args.agent}")
     if min(args.rounds, args.max_steps, args.eval_every) < 1:
         parser.error("Round and step counts must be positive.")
     for values in (args.seeds, args.eval_seeds, args.eval_seats):
@@ -179,7 +190,7 @@ def parse_args(argv=None):
 
 
 def run_training(args):
-    train_module = importlib.import_module(f"agent_code.{AGENT}.train")
+    train_module = importlib.import_module(f"agent_code.{args.agent}.train")
     args.output = args.output.resolve()
     args.output.mkdir(parents=True)
     config = vars(args).copy()
@@ -194,11 +205,18 @@ def run_training(args):
         Path(__file__).resolve(), SOURCE_DIR / "run_benchmark.py",
         SOURCE_DIR / "environment.py", SOURCE_DIR / "agents.py",
         SOURCE_DIR / "settings.py", SOURCE_DIR / "events.py",
-        SOURCE_DIR / "agent_code" / AGENT / "callbacks.py",
-        SOURCE_DIR / "agent_code" / AGENT / "features.py",
-        SOURCE_DIR / "agent_code" / AGENT / "safety.py",
-        SOURCE_DIR / "agent_code" / AGENT / "train.py",
+        SOURCE_DIR / "agent_code" / args.agent / "callbacks.py",
+        SOURCE_DIR / "agent_code" / args.agent / "features.py",
+        SOURCE_DIR / "agent_code" / args.agent / "safety.py",
+        SOURCE_DIR / "agent_code" / args.agent / "train.py",
     ]
+    if args.agent == "combat_fqi_history_antistag_agent":
+        # The variant intentionally imports the already audited combat feature
+        # and safety implementation; hash those dependencies for provenance.
+        source_paths.extend([
+            SOURCE_DIR / "agent_code" / "combat_fqi_agent" / "features.py",
+            SOURCE_DIR / "agent_code" / "combat_fqi_agent" / "safety.py",
+        ])
     config["source_hashes"] = {
         str(path.relative_to(SOURCE_DIR)): hashlib.sha256(path.read_bytes()).hexdigest()
         for path in source_paths
@@ -209,7 +227,7 @@ def run_training(args):
     config["sklearn"] = sklearn.__version__
     save_json(args.output / "config.json", config)
 
-    curve = []
+    jobs = []
     for index, seed in enumerate(args.seeds):
         directory = args.output / f"seed_{seed}"
         directory.mkdir()
@@ -219,8 +237,21 @@ def run_training(args):
         run_config["board_start"] = 4000 + index * args.rounds
         config_path = directory / "config.json"
         save_json(config_path, run_config)
-        subprocess.run([sys.executable, str(Path(__file__).resolve()),
-                        "--worker", str(config_path)], check=True)
+        command = [sys.executable, str(Path(__file__).resolve()),
+                   "--worker", str(config_path)]
+        if args.parallel_seeds:
+            jobs.append((seed, directory, subprocess.Popen(command)))
+        else:
+            subprocess.run(command, check=True)
+            jobs.append((seed, directory, None))
+
+    for seed, _, process in jobs:
+        if process is not None and process.wait() != 0:
+            raise subprocess.CalledProcessError(process.returncode,
+                                                f"training seed {seed}")
+
+    curve = []
+    for seed, directory, _ in jobs:
         with open(directory / "learning_curve.json") as file:
             curve.extend({"seed": seed, **row} for row in json.load(file))
     save_json(args.output / "learning_curve.json", curve)

@@ -111,3 +111,8 @@ screenshots/*.webm
 
 replays/
 results/
+
+# Local links to external agents used only for comparison.
+# These repositories belong to other project members and are not vendored here.
+/agent_code/harvy
+/agent_code/ruehl_based_agent

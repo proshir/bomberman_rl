@@ -1,16 +1,17 @@
 """Tree fitted-Q navigation with learned recent-movement inputs."""
 
 import pickle
+import os
 from collections import deque
 from pathlib import Path
 
 import numpy as np
 
-from .features import ACTIONS, legal_action_indices, state_to_features
+from .features import ACTIONS, MAX_STEPS, legal_action_indices, state_to_features
 
 MODEL_PATH = Path(__file__).resolve().parent / 'trees.pkl'
 FEATURE_MODE = 'distance'
-HISTORY_LENGTH = 8
+HISTORY_LENGTH = int(os.environ.get('TREE_HISTORY_LENGTH', '8'))
 
 
 def state_key(game_state):
@@ -34,6 +35,7 @@ def setup(self):
             raise ValueError('Checkpoint has the wrong number of trees.')
     self.round_id = None
     self.last_coins = None
+    self.last_coin_step = 0
     self.previous_action = ACTIONS.index('WAIT')
     self.positions = deque(maxlen=HISTORY_LENGTH)
     self.feature_cache = {}
@@ -52,31 +54,39 @@ def features_for_act(self, game_state):
         self.round_id = game_state['round']
         self.positions.clear()
         self.last_coins = None
+        self.last_coin_step = int(game_state['step'])
         self.previous_action = ACTIONS.index('WAIT')
     coins = tuple(sorted(game_state['coins']))
     if coins != self.last_coins:
         self.positions.clear()
         self.last_coins = coins
+        self.last_coin_step = int(game_state['step'])
     position = game_state['self'][3]
     feature = state_to_features(game_state, self.previous_action,
-                                self.positions.count(position))
+                                self.positions.count(position),
+                                int(game_state['step']) - self.last_coin_step,
+                                max(0, MAX_STEPS - int(game_state['step'])))
     self.feature_cache[state_key(game_state)] = (
-        feature, tuple(self.positions), coins, self.previous_action)
+        feature, tuple(self.positions), coins, self.previous_action,
+        self.last_coin_step)
     self.positions.append(position)
     return feature
 
 
 def next_features(self, old_state, action, new_state):
     """Construct the history inputs that the next decision will observe."""
-    feature, history, old_coins, _ = self.feature_cache[state_key(old_state)]
+    feature, history, old_coins, _, last_coin_step = self.feature_cache[state_key(old_state)]
     del feature
     history = deque(history, maxlen=HISTORY_LENGTH)
     history.append(old_state['self'][3])
     new_coins = tuple(sorted(new_state['coins']))
     if new_coins != old_coins:
         history.clear()
+        last_coin_step = int(new_state['step'])
     return state_to_features(new_state, ACTIONS.index(action),
-                             history.count(new_state['self'][3]))
+                             history.count(new_state['self'][3]),
+                             int(new_state['step']) - last_coin_step,
+                             max(0, MAX_STEPS - int(new_state['step'])))
 
 
 def act(self, game_state):

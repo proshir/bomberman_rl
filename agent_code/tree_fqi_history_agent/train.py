@@ -1,6 +1,7 @@
 """Fitted-Q training for the tree agent with learned history inputs."""
 
 import pickle
+import os
 from collections import deque
 
 import numpy as np
@@ -15,6 +16,7 @@ EPSILON_MIN = 0.05
 EPSILON_DECAY = 0.995
 COIN_REWARD = 1.0
 STEP_COST = 0.01
+REVISIT_PENALTY = float(os.environ.get('TREE_REVISIT_PENALTY', '0'))
 BUFFER_SIZE = 30000
 FIT_ITERATIONS = 5
 MAX_DEPTH = 8
@@ -34,8 +36,13 @@ def reward_from_events(events):
 
 
 def remember(self, state, action, next_state, events):
-    reward = reward_from_events(events)
-    features = self.feature_cache[state_key(state)][0]
+    cached = self.feature_cache[state_key(state)]
+    features = cached[0]
+    recent_positions = cached[1]
+    revisit = (next_state is not None and
+               next_state['self'][3] in recent_positions and
+               e.COIN_COLLECTED not in events)
+    reward = reward_from_events(events) - (REVISIT_PENALTY if revisit else 0.0)
     legal = np.zeros(len(ACTIONS), dtype=bool)
     future = None
     if next_state is not None:

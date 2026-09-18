@@ -24,15 +24,34 @@ def file_hash(path):
 
 
 def checkpoints(pilot):
-    with open(pilot / 'config.json') as file:
+    config_path = pilot / 'config.json'
+    if not config_path.is_file():
+        # Parallel single-seed runs store their protocol one level below the
+        # aggregate output directory.
+        config_path = pilot / 'seed_0' / 'config.json'
+    with open(config_path) as file:
         config = json.load(file)
-    if config['seeds'] != [0, 1, 2] or config['rounds'] != 300:
+    if config['rounds'] != 300:
+        raise ValueError(f'Unexpected pilot protocol: {pilot}')
+    seeds = config.get('seeds', [])
+    if seeds != [0, 1, 2]:
+        seeds = sorted(
+            int(path.parent.name.removeprefix('seed_'))
+            for path in pilot.glob('seed_*/config.json')
+        )
+    if seeds != [0, 1, 2]:
         raise ValueError(f'Unexpected pilot protocol: {pilot}')
     result = []
-    for seed in config['seeds']:
-        path = pilot / f'seed_{seed}/checkpoints/episode_0300.pkl'
-        if not path.is_file():
-            path = pilot / f'seed_{seed}/training.pkl'
+    for seed in seeds:
+        candidates = [
+            pilot / f'seed_{seed}/checkpoints/episode_0300.pkl',
+            pilot / f'seed_{seed}/seed_{seed}/checkpoints/episode_0300.pkl',
+            pilot / f'seed_{seed}/training.pkl',
+            pilot / f'seed_{seed}/seed_{seed}/training.pkl',
+        ]
+        path = next((candidate for candidate in candidates if candidate.is_file()), None)
+        if path is None:
+            raise FileNotFoundError(f'No round-300 checkpoint found under {pilot} for seed {seed}')
         result.append((seed, path))
     return result
 
@@ -54,11 +73,20 @@ def run_policy(agent, checkpoint, max_steps, output):
 def main():
     parser = ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--base-agent', default='tree_fqi_agent',
+                        help='Agent name for the baseline policy.')
+    parser.add_argument('--base-pilot', type=Path, default=Path('experiments/tree_fqi_pilot'),
+                        help='Baseline pilot directory.')
+    parser.add_argument('--history-pilot', type=Path,
+                        default=Path('experiments/tree_fqi_history_pilot'),
+                        help='History-agent pilot directory to evaluate.')
     args = parser.parse_args()
     if args.output.exists():
         parser.error('Choose a new --output directory.')
     args.output.mkdir(parents=True)
 
+    PILOTS['base'] = (args.base_agent, args.base_pilot)
+    PILOTS['history'] = ('tree_fqi_history_agent', args.history_pilot)
     sources = [Path(__file__), SOURCE_DIR / 'run_benchmark.py']
     for agent, _ in PILOTS.values():
         sources.append(SOURCE_DIR / 'agent_code' / agent / 'callbacks.py')
