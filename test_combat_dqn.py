@@ -13,7 +13,9 @@ import torch
 from torch import optim
 
 from agent_code.combat_dqn_agent import train as dqn_train
+from agent_code.combat_dqn_agent import callbacks as dqn_callbacks
 from agent_code.combat_dqn_agent.config import N_ACTIONS
+from agent_code.combat_dqn_agent.features import ACTIONS
 from agent_code.combat_dqn_agent.model import QNetwork, save_checkpoint, vanilla_targets
 from agent_code.combat_dqn_agent.replay import ReplayBuffer
 
@@ -42,6 +44,21 @@ class VanillaDQNTest(unittest.TestCase):
 
     def test_network_shape(self):
         self.assertEqual(tuple(QNetwork(32, N_ACTIONS)(torch.zeros(3, 32)).shape), (3, 6))
+
+    def test_action_selection_stays_within_legal_candidates(self):
+        learner = SimpleNamespace(
+            train=True, seed=0, model_path=Path(tempfile.mkdtemp()) / "unused.pt",
+        )
+        dqn_callbacks.setup(learner)
+        state = {
+            "round": 1, "step": 1,
+            "field": np.zeros((17, 17), dtype=int),
+            "bombs": [], "explosion_map": np.zeros((17, 17), dtype=int),
+            "coins": [], "self": ("dqn", 0, True, (8, 8)), "others": [],
+        }
+        with mock.patch.object(dqn_callbacks, "safe_action_indices", return_value=[2]), \
+             mock.patch.object(dqn_callbacks, "best_survival_action_indices", return_value=[2]):
+            self.assertEqual(dqn_callbacks.act(learner, state), ACTIONS[2])
 
     def test_checkpoint_round_trip_contains_optimizer_and_counters(self):
         policy = QNetwork(4, N_ACTIONS)
