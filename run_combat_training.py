@@ -90,6 +90,15 @@ def train(config):
     s.LOG_GAME = s.LOG_AGENT_WRAPPER = s.LOG_AGENT_CODE = logging.WARNING
     random.seed(config["seed"])
     np.random.seed(config["seed"])
+    # DQN network initialization otherwise depends on process entropy, which
+    # makes repeated runs with the same experiment seed incomparable.
+    try:
+        import torch
+        torch.manual_seed(int(config["seed"]))
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(int(config["seed"]))
+    except ImportError:
+        pass
 
     args = SimpleNamespace(
         seed=config["seed"],
@@ -274,6 +283,17 @@ def run_training(args):
             SOURCE_DIR / "agent_code" / "combat_dqn_agent" / "config.py",
             SOURCE_DIR / "agent_code" / "combat_dqn_agent" / "model.py",
             SOURCE_DIR / "agent_code" / "combat_dqn_agent" / "replay.py",
+        ])
+    if args.agent == "combat_dqn_topology_agent":
+        source_paths.extend([
+            SOURCE_DIR / "agent_code" / "combat_dqn_agent" / "callbacks.py",
+            SOURCE_DIR / "agent_code" / "combat_dqn_agent" / "config.py",
+            SOURCE_DIR / "agent_code" / "combat_dqn_agent" / "model.py",
+            SOURCE_DIR / "agent_code" / "combat_dqn_agent" / "replay.py",
+            SOURCE_DIR / "agent_code" / "combat_dqn_agent" / "train.py",
+            SOURCE_DIR / "agent_code" / "combat_fqi_history_antistag_agent" / "features.py",
+            SOURCE_DIR / "agent_code" / "combat_fqi_history_antistag_agent" / "safety.py",
+            SOURCE_DIR / "agent_code" / "combat_fqi_history_antistag_topology_agent" / "features.py",
         ])
     config["source_hashes"] = {
         str(path.relative_to(SOURCE_DIR)): hashlib.sha256(path.read_bytes()).hexdigest()

@@ -10,8 +10,9 @@ import settings as s
 import torch
 from torch import optim
 
+from . import features as base_features
 from .config import EPSILON_END, LEARNING_RATE, N_ACTIONS
-from .features import ACTIONS, state_to_features
+from .features import ACTIONS
 from .model import DEVICE, QNetwork, load_checkpoint, save_checkpoint
 from .safety import best_survival_action_indices, safe_action_indices
 
@@ -44,6 +45,14 @@ def _probe_state():
     }
 
 
+def _state_to_features(self, game_state, previous_action, recent_visits,
+                        steps_since_progress):
+    """Use the agent-selected feature module for this DQN variant."""
+    return self.feature_module.state_to_features(
+        game_state, previous_action, recent_visits, steps_since_progress
+    )
+
+
 def setup(self):
     self.rng = np.random.default_rng(getattr(self, "seed", None))
     self.model_path = Path(getattr(self, "model_path", MODEL_PATH))
@@ -53,7 +62,11 @@ def setup(self):
     self.last_progress_step = 0
     self.previous_action = ACTIONS.index("WAIT")
     self.positions = deque(maxlen=8)
-    self.policy_net = QNetwork(len(state_to_features(_probe_state())), N_ACTIONS).to(DEVICE)
+    if not hasattr(self, "feature_module"):
+        self.feature_module = base_features
+    self.policy_net = QNetwork(
+        len(self.feature_module.state_to_features(_probe_state())), N_ACTIONS
+    ).to(DEVICE)
     self.target_net = QNetwork(self.policy_net.input_dim, N_ACTIONS).to(DEVICE)
     self.target_net.load_state_dict(self.policy_net.state_dict())
     self.target_net.eval()
@@ -91,8 +104,8 @@ def _features_for_state(self, game_state):
         self.last_progress = signature
         self.last_progress_step = int(game_state["step"])
     position = tuple(game_state["self"][3])
-    feature = state_to_features(
-        game_state, self.previous_action, self.positions.count(position),
+    feature = _state_to_features(
+        self, game_state, self.previous_action, self.positions.count(position),
         int(game_state["step"]) - self.last_progress_step,
     )
     self.feature_cache[state_key(game_state)] = (
@@ -110,8 +123,8 @@ def next_features(self, old_state, action, new_state):
         history.clear()
         last_step = int(new_state["step"])
     position = tuple(new_state["self"][3])
-    return state_to_features(
-        new_state, ACTIONS.index(action), history.count(position),
+    return _state_to_features(
+        self, new_state, ACTIONS.index(action), history.count(position),
         int(new_state["step"]) - last_step,
     )
 
