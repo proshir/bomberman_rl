@@ -36,6 +36,7 @@ def evaluate(config, learner, episode, interactions):
         '--model-path', str(checkpoint), '--max-steps', str(config['max_steps']),
         '--seeds', *map(str, config['eval_seeds']),
         '--agent-seeds', '0', '--seats', '0', '1', '2', '3',
+        '--batch-size', str(4 * len(config['eval_seeds'])),
         '--output', str(output),
     ]
     output.parent.mkdir(exist_ok=True)
