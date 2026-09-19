@@ -70,10 +70,13 @@ def setup(self):
         self.dqn_algorithm = ALGORITHM
     if not hasattr(self, "feature_module"):
         self.feature_module = base_features
-    self.policy_net = QNetwork(
+    network_class = getattr(self, "network_class", QNetwork)
+    self.policy_net = network_class(
         len(self.feature_module.state_to_features(_probe_state())), N_ACTIONS
     ).to(DEVICE)
-    self.target_net = QNetwork(self.policy_net.input_dim, N_ACTIONS).to(DEVICE)
+    self.target_net = network_class(
+        self.policy_net.input_dim, N_ACTIONS
+    ).to(DEVICE)
     self.target_net.load_state_dict(self.policy_net.state_dict())
     self.target_net.eval()
     self.optimizer = optim.Adam(self.policy_net.parameters(), lr=LEARNING_RATE)

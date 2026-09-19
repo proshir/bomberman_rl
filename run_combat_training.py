@@ -434,6 +434,7 @@ def run_training(args):
         "Agent_025_combat_ddqn_short_cycle_agent",
         "Agent_026_combat_ddqn_target_coverage_agent",
         "Agent_027_combat_ddqn_short_cycle_staged_replay_agent",
+        "Agent_028_combat_ddqn_dueling_256_agent",
     }:
         # This successor intentionally reuses the repaired DQN implementation
         # and history/safety code while replacing only its representation.
@@ -451,6 +452,13 @@ def run_training(args):
     if args.agent == "Agent_027_combat_ddqn_short_cycle_staged_replay_agent":
         source_paths.extend([
             SOURCE_DIR / "agent_code" / args.agent / "replay.py",
+            SOURCE_DIR / "agent_code" / "Agent_025_combat_ddqn_short_cycle_agent" / "features.py",
+        ])
+    if args.agent == "Agent_028_combat_ddqn_dueling_256_agent":
+        source_paths.extend([
+            SOURCE_DIR / "agent_code" / args.agent / "model.py",
+            SOURCE_DIR / "agent_code" / "Agent_027_combat_ddqn_short_cycle_staged_replay_agent" / "callbacks.py",
+            SOURCE_DIR / "agent_code" / "Agent_027_combat_ddqn_short_cycle_staged_replay_agent" / "replay.py",
             SOURCE_DIR / "agent_code" / "Agent_025_combat_ddqn_short_cycle_agent" / "features.py",
         ])
     if args.agent == "Agent_023_spatial_hybrid_rainbow_agent":
