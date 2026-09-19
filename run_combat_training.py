@@ -23,13 +23,50 @@ from run_benchmark import BenchmarkWorld, SOURCE_DIR, save_json
 
 
 DEFAULT_AGENT = "combat_fqi_agent"
+DEFAULT_CLASSIC_OPPONENTS = [
+    "peaceful_agent", "coin_collector_agent", "rule_based_agent",
+]
 
 
-def episode_scenario(config, episode):
-    """Return the environment used by one training episode."""
+def _cycled_choice(options, offset):
+    return options[int(offset) % len(options)]
+
+
+def episode_plan(config, episode):
+    """Return scenario, optional opponent, and replay weights for one episode."""
     if config.get("curriculum") == "mixed":
-        return "coin-heaven" if episode % 2 else "loot-crate"
-    return config["scenario"]
+        scenario = "coin-heaven" if episode % 2 else "loot-crate"
+        return scenario, None, {"coin-heaven": 0.5, "loot-crate": 0.5}
+    if config.get("curriculum") != "staged-combat":
+        return config["scenario"], None, {config["scenario"]: 1.0}
+
+    if episode <= 100:
+        # 70% navigation, 30% crate exposure.
+        scenario = _cycled_choice(
+            ("coin-heaven", "coin-heaven", "coin-heaven", "coin-heaven",
+             "coin-heaven", "coin-heaven", "coin-heaven", "loot-crate",
+             "loot-crate", "loot-crate"), episode - 1,
+        )
+        return scenario, None, {"coin-heaven": 0.7, "loot-crate": 0.3}
+    if episode <= 300:
+        # Reverse the emphasis while rehearsing navigation.
+        scenario = _cycled_choice(
+            ("coin-heaven", "loot-crate", "loot-crate", "loot-crate"),
+            episode - 101,
+        )
+        return scenario, None, {"coin-heaven": 0.25, "loot-crate": 0.75}
+
+    # Half classic experience, with the retained solo tasks sampled equally.
+    scenario = _cycled_choice(
+        ("classic", "classic", "coin-heaven", "loot-crate"), episode - 301,
+    )
+    opponent = None
+    if scenario == "classic":
+        classic_index = (episode - 301) // 4 * 2 + (episode - 301) % 2
+        opponent = _cycled_choice(config["classic_opponents"], classic_index)
+    return scenario, opponent, {
+        "coin-heaven": 0.25, "loot-crate": 0.25, "classic": 0.5,
+    }
 
 
 def evaluate(config, learner, episode, interactions, scenario):
@@ -45,7 +82,7 @@ def evaluate(config, learner, episode, interactions, scenario):
             pickle.dump(learner.trees, file)
 
     evaluation_root = directory / "evaluation"
-    if config.get("curriculum") == "mixed":
+    if config.get("curriculum") in {"mixed", "staged-combat"}:
         evaluation_root = evaluation_root / scenario
     output = evaluation_root / f"episode_{episode:04d}"
     command = [
@@ -104,7 +141,7 @@ def train(config):
     except ImportError:
         pass
 
-    args = SimpleNamespace(
+    solo_args = SimpleNamespace(
         seed=config["seed"],
         agent_seed=config["seed"],
         seat=0,
@@ -120,11 +157,34 @@ def train(config):
     )
     (directory / "checkpoints").mkdir(exist_ok=True)
     (directory / "logs").mkdir(exist_ok=True)
-    lineup = [(config["agent"], True)] + [
-        (name, False) for name in config["opponents"]
-    ]
-    world = BenchmarkWorld(args, lineup)
+    world = BenchmarkWorld(
+        solo_args,
+        [(config["agent"], True)] + [(name, False) for name in config["opponents"]],
+    )
     learner = world.agents[0].backend.runner.fake_self
+    classic_worlds = {}
+    if config.get("curriculum") == "staged-combat":
+        # Build one reusable world per opponent, but rebind each candidate
+        # wrapper to the solo learner. This keeps one model, optimizer, and
+        # replay buffer while rotating the classic opponent every episode.
+        for opponent in config["classic_opponents"]:
+            classic_log_dir = directory / "logs" / opponent
+            classic_agent_log_dir = classic_log_dir / "agents"
+            classic_log_dir.mkdir(parents=True, exist_ok=True)
+            classic_agent_log_dir.mkdir(parents=True, exist_ok=True)
+            classic_args = SimpleNamespace(
+                seed=config["seed"], agent_seed=config["seed"], seat=0,
+                scenario="classic", no_gui=True, save_replay=False,
+                save_stats=False, match_name=None,
+                continue_without_training=False, silence_errors=False,
+                log_dir=str(classic_log_dir),
+                agent_log_dir=str(classic_agent_log_dir),
+            )
+            classic_world = BenchmarkWorld(
+                classic_args, [(config["agent"], True), (opponent, False)]
+            )
+            classic_world.agents[0].backend.runner.fake_self = learner
+            classic_worlds[opponent] = (classic_world, classic_args)
 
     start_episode = int(config.get("start_episode", 0))
     curve_path = directory / "learning_curve.json"
@@ -148,26 +208,38 @@ def train(config):
         for episode in tqdm(range(start_episode + 1, config["rounds"] + 1),
                             desc=f"{config['agent']} seed {config['seed']}"):
             board_seed = config["board_start"] + episode - 1
-            world.rng = np.random.default_rng(board_seed)
-            args.seat = (episode - 1) % 4
-            args.scenario = episode_scenario(config, episode)
+            scenario, opponent, replay_weights = episode_plan(config, episode)
+            if opponent is None:
+                active_world, active_args = world, solo_args
+            else:
+                active_world, active_args = classic_worlds[opponent]
+            active_world.rng = np.random.default_rng(board_seed)
+            # Round IDs are part of the action-time feature cache. Multiple
+            # worlds therefore use the global training episode as their round.
+            active_world.round = episode - 1
+            active_args.seat = (episode - 1) % 4
+            active_args.scenario = scenario
+            if hasattr(learner.replay_buffer, "set_context"):
+                learner.replay_buffer.set_context(scenario, replay_weights)
             epsilon = learner.epsilon
             started = perf_counter()
-            world.new_round()
-            while world.running:
-                world.do_step()
+            active_world.new_round()
+            while active_world.running:
+                active_world.do_step()
             training_seconds += perf_counter() - started
-            interactions += world.step
+            interactions += active_world.step
 
-            agent = world.agents[0]
+            agent = active_world.agents[0]
             stats = agent.statistics
             record = {
                 "episode": episode,
                 "board_seed": board_seed,
-                "scenario": args.scenario,
+                "scenario": scenario,
+                "opponent": opponent,
+                "replay_weights": replay_weights,
                 "agent_seed": config["seed"],
-                "seat": args.seat,
-                "steps": world.step,
+                "seat": active_args.seat,
+                "steps": active_world.step,
                 "interactions": interactions,
                 "score": agent.score,
                 "coins": stats["coins"],
@@ -196,6 +268,8 @@ def train(config):
                 )
                 save_json(directory / "learning_curve.json", curve)
     world.end()
+    for classic_world, _ in classic_worlds.values():
+        classic_world.end()
 
 
 def parse_args(argv=None):
@@ -204,12 +278,17 @@ def parse_args(argv=None):
     parser.add_argument("--scenario",
                         choices=["coin-heaven", "loot-crate", "classic"],
                         default="loot-crate")
-    parser.add_argument("--curriculum", choices=["none", "mixed"],
+    parser.add_argument("--curriculum", choices=["none", "mixed", "staged-combat"],
                         default="none",
-                        help="Alternate Coin Heaven and loot-crate training rounds.")
+                        help=("Training schedule: none, alternating solo mixed, or "
+                              "100 navigation / 200 crate / 300 retained-combat."))
     parser.add_argument("--diagnostics", action="store_true",
                         help="Record crate/coin progress diagnostics during evaluation.")
     parser.add_argument("--opponents", nargs="*", default=[])
+    parser.add_argument(
+        "--classic-opponents", nargs="+", default=DEFAULT_CLASSIC_OPPONENTS,
+        help="Single-opponent classic roster rotated during staged-combat training.",
+    )
     parser.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
     parser.add_argument("--rounds", type=int, default=300)
     parser.add_argument("--max-steps", type=int, default=400)
@@ -241,8 +320,8 @@ def parse_args(argv=None):
         parser.error("Choose a new --output directory, or pass --resume.")
     if len(args.opponents) > 3:
         parser.error("At most three opponents are allowed.")
-    if args.curriculum == "mixed" and args.opponents:
-        parser.error("Mixed curriculum currently supports solo training only.")
+    if args.curriculum in {"mixed", "staged-combat"} and args.opponents:
+        parser.error("Curriculum schedules manage opponents internally; omit --opponents.")
     if not (SOURCE_DIR / "agent_code" / args.agent / "callbacks.py").is_file():
         parser.error(f"Unknown training agent: {args.agent}")
     if min(args.rounds, args.max_steps, args.eval_every) < 1:
@@ -253,6 +332,12 @@ def parse_args(argv=None):
     for opponent in args.opponents:
         if not (SOURCE_DIR / "agent_code" / opponent / "callbacks.py").is_file():
             parser.error(f"Unknown opponent: {opponent}")
+    if args.curriculum == "staged-combat":
+        if len(args.classic_opponents) > 3:
+            parser.error("At most three staged classic opponents are supported.")
+        for opponent in args.classic_opponents:
+            if not (SOURCE_DIR / "agent_code" / opponent / "callbacks.py").is_file():
+                parser.error(f"Unknown staged classic opponent: {opponent}")
     training_boards = set(range(4000, 4000 + args.rounds * len(args.seeds)))
     if training_boards.intersection(args.eval_seeds):
         parser.error("Evaluation seeds overlap training board seeds.")
@@ -271,7 +356,7 @@ def run_training(args):
             )
         with open(config_path) as file:
             previous_config = json.load(file)
-        for name in ("agent", "scenario", "curriculum", "opponents"):
+        for name in ("agent", "scenario", "curriculum", "opponents", "classic_opponents"):
             if name in previous_config and getattr(args, name) != previous_config[name]:
                 raise ValueError(
                     f"--resume configuration mismatch for {name}: "
@@ -290,7 +375,7 @@ def run_training(args):
         config["resumed_from_rounds"] = previous_config.get("rounds")
     config["evaluation_scenarios"] = (
         ["coin-heaven", "loot-crate"]
-        if args.curriculum == "mixed" else [args.scenario]
+        if args.curriculum in {"mixed", "staged-combat"} else [args.scenario]
     )
     config["hyperparameters"] = {
         name: value for name, value in vars(train_module).items()
@@ -348,6 +433,7 @@ def run_training(args):
         "Agent_024_combat_ddqn_action_safety_agent",
         "Agent_025_combat_ddqn_short_cycle_agent",
         "Agent_026_combat_ddqn_target_coverage_agent",
+        "Agent_027_combat_ddqn_short_cycle_staged_replay_agent",
     }:
         # This successor intentionally reuses the repaired DQN implementation
         # and history/safety code while replacing only its representation.
@@ -361,6 +447,11 @@ def run_training(args):
             SOURCE_DIR / "agent_code" / "combat_fqi_agent" / "safety.py",
             SOURCE_DIR / "agent_code" / "combat_fqi_history_antistag_agent" / "features.py",
             SOURCE_DIR / "agent_code" / "combat_fqi_history_antistag_agent" / "safety.py",
+        ])
+    if args.agent == "Agent_027_combat_ddqn_short_cycle_staged_replay_agent":
+        source_paths.extend([
+            SOURCE_DIR / "agent_code" / args.agent / "replay.py",
+            SOURCE_DIR / "agent_code" / "Agent_025_combat_ddqn_short_cycle_agent" / "features.py",
         ])
     if args.agent == "Agent_023_spatial_hybrid_rainbow_agent":
         # Agent 023 is intentionally self-contained; include every runtime
