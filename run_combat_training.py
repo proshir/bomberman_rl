@@ -294,7 +294,7 @@ def run_training(args):
     )
     config["hyperparameters"] = {
         name: value for name, value in vars(train_module).items()
-        if name.isupper() and isinstance(value, (int, float))
+        if name.isupper() and isinstance(value, (int, float, str))
     }
     config["code_version"] = subprocess.check_output(
         ["git", "-C", str(SOURCE_DIR), "rev-parse", "HEAD"], text=True).strip()
@@ -342,6 +342,28 @@ def run_training(args):
             SOURCE_DIR / "agent_code" / "combat_fqi_history_antistag_agent" / "features.py",
             SOURCE_DIR / "agent_code" / "combat_fqi_history_antistag_agent" / "safety.py",
             SOURCE_DIR / "agent_code" / "combat_fqi_history_antistag_topology_agent" / "features.py",
+        ])
+    if args.agent == "Agent_022_combat_ddqn_route_agent":
+        # This successor intentionally reuses the repaired DQN implementation
+        # and history/safety code while replacing only its representation.
+        source_paths.extend([
+            SOURCE_DIR / "agent_code" / "combat_dqn_agent" / "callbacks.py",
+            SOURCE_DIR / "agent_code" / "combat_dqn_agent" / "config.py",
+            SOURCE_DIR / "agent_code" / "combat_dqn_agent" / "model.py",
+            SOURCE_DIR / "agent_code" / "combat_dqn_agent" / "replay.py",
+            SOURCE_DIR / "agent_code" / "combat_dqn_agent" / "train.py",
+            SOURCE_DIR / "agent_code" / "combat_fqi_agent" / "features.py",
+            SOURCE_DIR / "agent_code" / "combat_fqi_agent" / "safety.py",
+            SOURCE_DIR / "agent_code" / "combat_fqi_history_antistag_agent" / "features.py",
+            SOURCE_DIR / "agent_code" / "combat_fqi_history_antistag_agent" / "safety.py",
+        ])
+    if args.agent == "Agent_023_spatial_hybrid_rainbow_agent":
+        # Agent 023 is intentionally self-contained; include every runtime
+        # module in provenance rather than relying on a shared DQN package.
+        source_paths.extend([
+            SOURCE_DIR / "agent_code" / args.agent / "__init__.py",
+            SOURCE_DIR / "agent_code" / args.agent / "config.py",
+            SOURCE_DIR / "agent_code" / args.agent / "model.py",
         ])
     config["source_hashes"] = {
         str(path.relative_to(SOURCE_DIR)): hashlib.sha256(path.read_bytes()).hexdigest()

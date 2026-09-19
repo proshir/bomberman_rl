@@ -54,7 +54,8 @@ def optimize_model(self):
     values = self.policy_net(states).gather(1, actions[:, None]).squeeze(1)
     targets = dqn_targets(
         self.policy_net, self.target_net, next_states, rewards, dones, GAMMA,
-        next_action_masks, algorithm=ALGORITHM,
+        next_action_masks,
+        algorithm=getattr(self, "dqn_algorithm", ALGORITHM),
     )
     loss = F.smooth_l1_loss(values, targets)
     self.optimizer.zero_grad(set_to_none=True)

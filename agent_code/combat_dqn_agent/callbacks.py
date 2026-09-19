@@ -11,7 +11,7 @@ import torch
 from torch import optim
 
 from . import features as base_features
-from .config import EPSILON_END, LEARNING_RATE, N_ACTIONS
+from .config import ALGORITHM, EPSILON_END, LEARNING_RATE, N_ACTIONS
 from .features import ACTIONS
 from .model import DEVICE, QNetwork, load_checkpoint, save_checkpoint
 from .safety import best_survival_action_indices, safe_action_indices
@@ -64,6 +64,10 @@ def setup(self):
     self.last_progress_step = 0
     self.previous_action = ACTIONS.index("WAIT")
     self.positions = deque(maxlen=8)
+    # Variants can request the already shared DDQN implementation without
+    # copying the training callbacks or changing the vanilla-DQN baseline.
+    if not hasattr(self, "dqn_algorithm"):
+        self.dqn_algorithm = ALGORITHM
     if not hasattr(self, "feature_module"):
         self.feature_module = base_features
     self.policy_net = QNetwork(
