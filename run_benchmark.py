@@ -4,6 +4,7 @@ import logging
 import random
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from argparse import ArgumentParser, SUPPRESS
 from pathlib import Path
 from time import perf_counter
@@ -153,6 +154,19 @@ def play_game(config):
             'elapsed_seconds': elapsed, 'agents': results}
 
 
+def run_batch(batch_path):
+    """Run one isolated batch worker.
+
+    A thread is sufficient here because the actual game workload stays in a
+    fresh Python subprocess.  Keeping each batch in its own process prevents
+    callback state from one game batch leaking into another while letting the
+    parent schedule independent batches across CPU cores.
+    """
+    subprocess.run([sys.executable, __file__, '--worker', str(batch_path)],
+                   check=True)
+    return batch_path
+
+
 def confidence_interval(values, samples, seed):
     """Return a bootstrap confidence interval for the mean."""
     values = np.asarray(values, dtype=float)
@@ -249,6 +263,9 @@ def parse_args(argv=None):
     parser.add_argument('--analysis-seed', type=int, default=0)
     parser.add_argument('--batch-size', type=int, default=1,
                         help='Games evaluated in each worker process (default: 1).')
+    parser.add_argument('--parallel', type=int, default=1,
+                        help=('Independent game batches to run concurrently '
+                              'on CPU (default: 1).'))
     parser.add_argument('--diagnostics', action='store_true',
                         help='Record crate/coin progress and repeated-state diagnostics.')
     parser.add_argument('--worker', type=Path, help=SUPPRESS)
@@ -275,6 +292,8 @@ def parse_args(argv=None):
         parser.error('The step limit must be positive.')
     if args.batch_size < 1:
         parser.error('--batch-size must be positive.')
+    if args.parallel < 1:
+        parser.error('--parallel must be positive.')
 
     return args
 
@@ -310,21 +329,39 @@ def run_benchmark(args):
                     save_json(game_dir / 'config.json', config)
                     tasks.append((game_dir, candidate, config))
 
+    batches = [tasks[start:start + args.batch_size]
+               for start in range(0, len(tasks), args.batch_size)]
+    batch_dir = args.output / 'batches'
+    batch_dir.mkdir(exist_ok=True)
+    batch_specs = []
+    for index, batch in enumerate(batches):
+        batch_path = batch_dir / f'{index:04d}.json'
+        result_path = batch_dir / f'{index:04d}_results.json'
+        save_json(batch_path, {
+            'games': [config for _, _, config in batch],
+            'result_path': str(result_path),
+        })
+        batch_specs.append((batch, batch_path, result_path))
+
+    # ``executor.map`` returns in submission order, so the saved games.jsonl
+    # remains byte-for-byte ordered by the deterministic task expansion even
+    # though game simulation happens concurrently.
+    paths = [batch_path for _, batch_path, _ in batch_specs]
+    if args.parallel == 1:
+        completed = (run_batch(path) for path in paths)
+    else:
+        executor = ThreadPoolExecutor(max_workers=args.parallel)
+        completed = executor.map(run_batch, paths)
+    try:
+        for _ in tqdm(completed, total=len(paths)):
+            pass
+    finally:
+        if args.parallel > 1:
+            executor.shutdown(wait=True)
+
     results = []
     with open(args.output / 'games.jsonl', 'w') as file:
-        batches = [tasks[start:start + args.batch_size]
-                   for start in range(0, len(tasks), args.batch_size)]
-        for index, batch in enumerate(tqdm(batches)):
-            batch_dir = args.output / 'batches'
-            batch_dir.mkdir(exist_ok=True)
-            batch_path = batch_dir / f'{index:04d}.json'
-            result_path = batch_dir / f'{index:04d}_results.json'
-            save_json(batch_path, {
-                'games': [config for _, _, config in batch],
-                'result_path': str(result_path),
-            })
-            command = [sys.executable, __file__, '--worker', str(batch_path)]
-            subprocess.run(command, check=True)
+        for batch, _, result_path in batch_specs:
             with open(result_path) as result_file:
                 batch_results = json.load(result_file)
             if len(batch_results) != len(batch):

@@ -11,6 +11,7 @@ import random
 import subprocess
 import sys
 from argparse import ArgumentParser, SUPPRESS
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from time import perf_counter
 from types import SimpleNamespace
@@ -69,8 +70,8 @@ def episode_plan(config, episode):
     }
 
 
-def evaluate(config, learner, episode, interactions, scenario):
-    """Freeze the current model and evaluate it in a fresh process."""
+def save_evaluation_checkpoint(config, learner, episode):
+    """Save one immutable checkpoint shared by all evaluations of an episode."""
     directory = Path(config["output"])
     checkpoint = directory / "checkpoints" / f"episode_{episode:04d}.pkl"
     callbacks = importlib.import_module(
@@ -80,6 +81,12 @@ def evaluate(config, learner, episode, interactions, scenario):
     else:
         with open(checkpoint, "wb") as file:
             pickle.dump(learner.trees, file)
+    return checkpoint
+
+
+def evaluate_checkpoint(config, checkpoint, episode, interactions, scenario):
+    """Evaluate an already frozen checkpoint in a fresh CPU process."""
+    directory = Path(config["output"])
 
     evaluation_root = directory / "evaluation"
     if config.get("curriculum") in {"mixed", "staged-combat"}:
@@ -95,7 +102,13 @@ def evaluate(config, learner, episode, interactions, scenario):
         "--seeds", *map(str, config["eval_seeds"]),
         "--agent-seeds", "0",
         "--seats", *map(str, config["eval_seats"]),
-        "--batch-size", str(len(config["eval_seeds"]) * len(config["eval_seats"])),
+        # A one-game batch enables real CPU parallelism.  The previous single
+        # large batch is retained for the serial compatibility path.
+        "--batch-size", str(
+            1 if int(config.get("eval_workers", 1)) > 1
+            else len(config["eval_seeds"]) * len(config["eval_seats"])
+        ),
+        "--parallel", str(int(config.get("eval_workers", 1))),
         "--metric", "score" if config["opponents"] else "coins",
         "--output", str(output),
     ]
@@ -115,6 +128,29 @@ def evaluate(config, learner, episode, interactions, scenario):
         "checkpoint": str(checkpoint),
         **result,
     }
+
+
+def evaluate_all(config, learner, episode, interactions):
+    """Evaluate all scenarios from one checkpoint, optionally concurrently.
+
+    Each scenario has its own output directory and only reads the saved
+    checkpoint.  Parallelism therefore affects wall-clock time only, not the
+    training trajectory or the fixed evaluation task list.
+    """
+    checkpoint = save_evaluation_checkpoint(config, learner, episode)
+    scenarios = list(config["evaluation_scenarios"])
+    workers = min(len(scenarios), int(config.get("eval_scenario_workers", 1)))
+    if workers == 1:
+        return [
+            evaluate_checkpoint(config, checkpoint, episode, interactions, scenario)
+            for scenario in scenarios
+        ]
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        return list(executor.map(
+            lambda scenario: evaluate_checkpoint(
+                config, checkpoint, episode, interactions, scenario),
+            scenarios,
+        ))
 
 
 def train(config):
@@ -192,10 +228,7 @@ def train(config):
         with open(curve_path) as file:
             curve = json.load(file)
     else:
-        curve = [
-            evaluate(config, learner, 0, 0, scenario)
-            for scenario in config["evaluation_scenarios"]
-        ]
+        curve = evaluate_all(config, learner, 0, 0)
         save_json(curve_path, curve)
     # A resumed checkpoint carries the interaction counter.  This preserves
     # epsilon/training progress in logs even though the current checkpoint
@@ -262,10 +295,7 @@ def train(config):
             file.write(json.dumps(record) + "\n")
             file.flush()
             if episode % config["eval_every"] == 0 or episode == config["rounds"]:
-                curve.extend(
-                    evaluate(config, learner, episode, interactions, scenario)
-                    for scenario in config["evaluation_scenarios"]
-                )
+                curve.extend(evaluate_all(config, learner, episode, interactions))
                 save_json(directory / "learning_curve.json", curve)
     world.end()
     for classic_world, _ in classic_worlds.values():
@@ -298,6 +328,14 @@ def parse_args(argv=None):
     parser.add_argument("--eval-seats", type=int, nargs="+", choices=range(4),
                         default=[0, 1, 2, 3])
     parser.add_argument(
+        "--eval-workers", type=int, default=1,
+        help="CPU game workers within each frozen scenario evaluation.",
+    )
+    parser.add_argument(
+        "--eval-scenario-workers", type=int, default=1,
+        help="Frozen scenario evaluations to run concurrently per training seed.",
+    )
+    parser.add_argument(
         "--parallel-seeds", action="store_true",
         help="Train independent seeds concurrently on multi-core CPU hosts.",
     )
@@ -324,7 +362,8 @@ def parse_args(argv=None):
         parser.error("Curriculum schedules manage opponents internally; omit --opponents.")
     if not (SOURCE_DIR / "agent_code" / args.agent / "callbacks.py").is_file():
         parser.error(f"Unknown training agent: {args.agent}")
-    if min(args.rounds, args.max_steps, args.eval_every) < 1:
+    if min(args.rounds, args.max_steps, args.eval_every,
+           args.eval_workers, args.eval_scenario_workers) < 1:
         parser.error("Round and step counts must be positive.")
     for values in (args.seeds, args.eval_seeds, args.eval_seats):
         if len(set(values)) != len(values):
