@@ -343,7 +343,12 @@ def run_training(args):
             SOURCE_DIR / "agent_code" / "combat_fqi_history_antistag_agent" / "safety.py",
             SOURCE_DIR / "agent_code" / "combat_fqi_history_antistag_topology_agent" / "features.py",
         ])
-    if args.agent == "Agent_022_combat_ddqn_route_agent":
+    if args.agent in {
+        "Agent_022_combat_ddqn_route_agent",
+        "Agent_024_combat_ddqn_action_safety_agent",
+        "Agent_025_combat_ddqn_short_cycle_agent",
+        "Agent_026_combat_ddqn_target_coverage_agent",
+    }:
         # This successor intentionally reuses the repaired DQN implementation
         # and history/safety code while replacing only its representation.
         source_paths.extend([
