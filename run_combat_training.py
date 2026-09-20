@@ -38,7 +38,7 @@ def episode_plan(config, episode):
     if config.get("curriculum") == "mixed":
         scenario = "coin-heaven" if episode % 2 else "loot-crate"
         return scenario, None, {"coin-heaven": 0.5, "loot-crate": 0.5}
-    if config.get("curriculum") != "staged-combat":
+    if config.get("curriculum") not in {"staged-combat", "tournament-combat"}:
         return config["scenario"], None, {config["scenario"]: 1.0}
 
     if episode <= 100:
@@ -57,12 +57,39 @@ def episode_plan(config, episode):
         )
         return scenario, None, {"coin-heaven": 0.25, "loot-crate": 0.75}
 
+    # tournament-combat uses actual four-player lineups; staged-combat keeps
+    # the historical two-player protocol for reproducibility. After the
+    # mixed opponent phase, tournament-combat consolidates on the hardest
+    # configured lineup (the default is 3x rule-based) while retaining a
+    # small solo replay share.
+    if (config.get("curriculum") == "tournament-combat" and episode > 600
+            and config.get("classic_lineups")):
+        lineup = list(config["classic_lineups"][-1])
+        weights = {
+            "coin-heaven": 0.125,
+            "loot-crate": 0.125,
+            "classic|" + ",".join(lineup): 0.75,
+        }
+        return "classic", lineup, weights
+
     # Half classic experience, with the retained solo tasks sampled equally.
     scenario = _cycled_choice(
         ("classic", "classic", "coin-heaven", "loot-crate"), episode - 301,
     )
     opponent = None
     if scenario == "classic":
+        lineups = config.get("classic_lineups")
+        if config.get("curriculum") == "tournament-combat" and lineups:
+            lineup_index = (episode - 301) // 2
+            opponent = list(_cycled_choice(lineups, lineup_index))
+            weights = {
+                "coin-heaven": 0.25,
+                "loot-crate": 0.25,
+            }
+            for lineup in lineups:
+                tag = "classic|" + ",".join(lineup)
+                weights[tag] = 0.5 / len(lineups)
+            return scenario, opponent, weights
         classic_index = (episode - 301) // 4 * 2 + (episode - 301) % 2
         opponent = _cycled_choice(config["classic_opponents"], classic_index)
     return scenario, opponent, {
@@ -84,13 +111,17 @@ def save_evaluation_checkpoint(config, learner, episode):
     return checkpoint
 
 
-def evaluate_checkpoint(config, checkpoint, episode, interactions, scenario):
-    """Evaluate an already frozen checkpoint in a fresh CPU process."""
+def evaluate_checkpoint(config, checkpoint, episode, interactions, evaluation):
+    """Evaluate one frozen checkpoint in a fresh CPU process."""
+    scenario = evaluation["scenario"]
+    opponents = list(evaluation.get("opponents", []))
+    evaluation_name = evaluation["name"]
     directory = Path(config["output"])
 
     evaluation_root = directory / "evaluation"
-    if config.get("curriculum") in {"mixed", "staged-combat"}:
-        evaluation_root = evaluation_root / scenario
+    if config.get("curriculum") in {"mixed", "staged-combat",
+                                     "tournament-combat"}:
+        evaluation_root = evaluation_root / evaluation_name
     output = evaluation_root / f"episode_{episode:04d}"
     command = [
         sys.executable,
@@ -109,11 +140,11 @@ def evaluate_checkpoint(config, checkpoint, episode, interactions, scenario):
             else len(config["eval_seeds"]) * len(config["eval_seats"])
         ),
         "--parallel", str(int(config.get("eval_workers", 1))),
-        "--metric", "score" if config["opponents"] else "coins",
+        "--metric", "score" if opponents else "coins",
         "--output", str(output),
     ]
-    if config["opponents"]:
-        command.extend(["--opponents", *config["opponents"]])
+    if opponents:
+        command.extend(["--opponents", *opponents])
     if config.get("diagnostics"):
         command.append("--diagnostics")
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -123,7 +154,9 @@ def evaluate_checkpoint(config, checkpoint, episode, interactions, scenario):
         result = json.load(file)["agents"][config["agent"]]
     return {
         "episode": episode,
+        "evaluation": evaluation_name,
         "scenario": scenario,
+        "opponents": opponents,
         "interactions": interactions,
         "checkpoint": str(checkpoint),
         **result,
@@ -138,18 +171,30 @@ def evaluate_all(config, learner, episode, interactions):
     training trajectory or the fixed evaluation task list.
     """
     checkpoint = save_evaluation_checkpoint(config, learner, episode)
-    scenarios = list(config["evaluation_scenarios"])
-    workers = min(len(scenarios), int(config.get("eval_scenario_workers", 1)))
+    evaluations = [
+        {"name": scenario, "scenario": scenario, "opponents": []}
+        for scenario in config["evaluation_scenarios"]
+    ]
+    if config.get("curriculum") == "tournament-combat":
+        for lineup in config.get("classic_lineups", []):
+            opponents = list(lineup)
+            evaluations.append({
+                "name": "classic__" + "__".join(opponents),
+                "scenario": "classic",
+                "opponents": opponents,
+            })
+    workers = min(len(evaluations),
+                  int(config.get("eval_scenario_workers", 1)))
     if workers == 1:
         return [
-            evaluate_checkpoint(config, checkpoint, episode, interactions, scenario)
-            for scenario in scenarios
+            evaluate_checkpoint(config, checkpoint, episode, interactions, evaluation)
+            for evaluation in evaluations
         ]
     with ThreadPoolExecutor(max_workers=workers) as executor:
         return list(executor.map(
-            lambda scenario: evaluate_checkpoint(
-                config, checkpoint, episode, interactions, scenario),
-            scenarios,
+            lambda evaluation: evaluate_checkpoint(
+                config, checkpoint, episode, interactions, evaluation),
+            evaluations,
         ))
 
 
@@ -199,12 +244,17 @@ def train(config):
     )
     learner = world.agents[0].backend.runner.fake_self
     classic_worlds = {}
-    if config.get("curriculum") == "staged-combat":
-        # Build one reusable world per opponent, but rebind each candidate
+    if config.get("curriculum") in {"staged-combat", "tournament-combat"}:
+        # Build one reusable world per lineup, but rebind each candidate
         # wrapper to the solo learner. This keeps one model, optimizer, and
-        # replay buffer while rotating the classic opponent every episode.
-        for opponent in config["classic_opponents"]:
-            classic_log_dir = directory / "logs" / opponent
+        # replay buffer while rotating the classic lineup every episode.
+        lineups = config.get("classic_lineups") or [
+            [opponent] for opponent in config["classic_opponents"]
+        ]
+        for lineup in lineups:
+            lineup = tuple(lineup)
+            lineup_tag = ",".join(lineup)
+            classic_log_dir = directory / "logs" / lineup_tag.replace(",", "__")
             classic_agent_log_dir = classic_log_dir / "agents"
             classic_log_dir.mkdir(parents=True, exist_ok=True)
             classic_agent_log_dir.mkdir(parents=True, exist_ok=True)
@@ -217,10 +267,11 @@ def train(config):
                 agent_log_dir=str(classic_agent_log_dir),
             )
             classic_world = BenchmarkWorld(
-                classic_args, [(config["agent"], True), (opponent, False)]
+                classic_args,
+                [(config["agent"], True)] + [(name, False) for name in lineup],
             )
             classic_world.agents[0].backend.runner.fake_self = learner
-            classic_worlds[opponent] = (classic_world, classic_args)
+            classic_worlds[lineup] = (classic_world, classic_args)
 
     start_episode = int(config.get("start_episode", 0))
     curve_path = directory / "learning_curve.json"
@@ -245,7 +296,9 @@ def train(config):
             if opponent is None:
                 active_world, active_args = world, solo_args
             else:
-                active_world, active_args = classic_worlds[opponent]
+                lineup = (tuple(opponent) if isinstance(opponent, (list, tuple))
+                          else (opponent,))
+                active_world, active_args = classic_worlds[lineup]
             active_world.rng = np.random.default_rng(board_seed)
             # Round IDs are part of the action-time feature cache. Multiple
             # worlds therefore use the global training episode as their round.
@@ -253,7 +306,11 @@ def train(config):
             active_args.seat = (episode - 1) % 4
             active_args.scenario = scenario
             if hasattr(learner.replay_buffer, "set_context"):
-                learner.replay_buffer.set_context(scenario, replay_weights)
+                replay_tag = scenario
+                if (opponent is not None and
+                        config.get("curriculum") == "tournament-combat"):
+                    replay_tag += "|" + ",".join(lineup)
+                learner.replay_buffer.set_context(replay_tag, replay_weights)
             epsilon = learner.epsilon
             started = perf_counter()
             active_world.new_round()
@@ -308,16 +365,25 @@ def parse_args(argv=None):
     parser.add_argument("--scenario",
                         choices=["coin-heaven", "loot-crate", "classic"],
                         default="loot-crate")
-    parser.add_argument("--curriculum", choices=["none", "mixed", "staged-combat"],
+    parser.add_argument("--curriculum",
+                        choices=["none", "mixed", "staged-combat",
+                                 "tournament-combat"],
                         default="none",
                         help=("Training schedule: none, alternating solo mixed, or "
-                              "100 navigation / 200 crate / 300 retained-combat."))
+                              "100 navigation / 200 crate / 300 retained-combat. "
+                              "tournament-combat uses four-player lineups."))
     parser.add_argument("--diagnostics", action="store_true",
                         help="Record crate/coin progress diagnostics during evaluation.")
     parser.add_argument("--opponents", nargs="*", default=[])
     parser.add_argument(
         "--classic-opponents", nargs="+", default=DEFAULT_CLASSIC_OPPONENTS,
         help="Single-opponent classic roster rotated during staged-combat training.",
+    )
+    parser.add_argument(
+        "--classic-lineup", nargs="+", action="append", default=None,
+        help=("One or more opponent names for a tournament-combat lineup; repeat "
+              "for multiple lineups. Defaults to peaceful, collector, rule-based "
+              "and 3x rule-based."),
     )
     parser.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
     parser.add_argument("--rounds", type=int, default=300)
@@ -358,7 +424,7 @@ def parse_args(argv=None):
         parser.error("Choose a new --output directory, or pass --resume.")
     if len(args.opponents) > 3:
         parser.error("At most three opponents are allowed.")
-    if args.curriculum in {"mixed", "staged-combat"} and args.opponents:
+    if args.curriculum in {"mixed", "staged-combat", "tournament-combat"} and args.opponents:
         parser.error("Curriculum schedules manage opponents internally; omit --opponents.")
     if not (SOURCE_DIR / "agent_code" / args.agent / "callbacks.py").is_file():
         parser.error(f"Unknown training agent: {args.agent}")
@@ -371,12 +437,31 @@ def parse_args(argv=None):
     for opponent in args.opponents:
         if not (SOURCE_DIR / "agent_code" / opponent / "callbacks.py").is_file():
             parser.error(f"Unknown opponent: {opponent}")
-    if args.curriculum == "staged-combat":
+    if args.curriculum in {"staged-combat", "tournament-combat"}:
         if len(args.classic_opponents) > 3:
             parser.error("At most three staged classic opponents are supported.")
         for opponent in args.classic_opponents:
             if not (SOURCE_DIR / "agent_code" / opponent / "callbacks.py").is_file():
                 parser.error(f"Unknown staged classic opponent: {opponent}")
+    if args.classic_lineup is not None:
+        if args.curriculum != "tournament-combat":
+            parser.error("--classic-lineup requires --curriculum tournament-combat")
+        if not args.classic_lineup:
+            parser.error("At least one classic lineup is required")
+        for lineup in args.classic_lineup:
+            if not 1 <= len(lineup) <= 3:
+                parser.error("Each classic lineup must contain one to three opponents")
+            for opponent in lineup:
+                if not (SOURCE_DIR / "agent_code" / opponent / "callbacks.py").is_file():
+                    parser.error(f"Unknown classic lineup opponent: {opponent}")
+    if args.curriculum == "tournament-combat" and args.classic_lineup is None:
+        args.classic_lineup = [
+            ["peaceful_agent"],
+            ["coin_collector_agent"],
+            ["rule_based_agent"],
+            ["rule_based_agent", "rule_based_agent", "rule_based_agent"],
+        ]
+    args.classic_lineups = args.classic_lineup
     training_boards = set(range(4000, 4000 + args.rounds * len(args.seeds)))
     if training_boards.intersection(args.eval_seeds):
         parser.error("Evaluation seeds overlap training board seeds.")
@@ -395,7 +480,8 @@ def run_training(args):
             )
         with open(config_path) as file:
             previous_config = json.load(file)
-        for name in ("agent", "scenario", "curriculum", "opponents", "classic_opponents"):
+        for name in ("agent", "scenario", "curriculum", "opponents",
+                     "classic_opponents", "classic_lineups"):
             if name in previous_config and getattr(args, name) != previous_config[name]:
                 raise ValueError(
                     f"--resume configuration mismatch for {name}: "
@@ -414,7 +500,8 @@ def run_training(args):
         config["resumed_from_rounds"] = previous_config.get("rounds")
     config["evaluation_scenarios"] = (
         ["coin-heaven", "loot-crate"]
-        if args.curriculum in {"mixed", "staged-combat"} else [args.scenario]
+        if args.curriculum in {"mixed", "staged-combat", "tournament-combat"}
+        else [args.scenario]
     )
     config["hyperparameters"] = {
         name: value for name, value in vars(train_module).items()
