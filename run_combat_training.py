@@ -28,6 +28,7 @@ DEFAULT_AGENT = "combat_fqi_agent"
 DEFAULT_CLASSIC_OPPONENTS = [
     "peaceful_agent", "coin_collector_agent", "rule_based_agent",
 ]
+TOURNAMENT_CURRICULA = {"tournament-combat", "tournament-combat-retained-solo"}
 
 
 def _cycled_choice(options, offset):
@@ -39,7 +40,7 @@ def episode_plan(config, episode):
     if config.get("curriculum") == "mixed":
         scenario = "coin-heaven" if episode % 2 else "loot-crate"
         return scenario, None, {"coin-heaven": 0.5, "loot-crate": 0.5}
-    if config.get("curriculum") not in {"staged-combat", "tournament-combat"}:
+    if config.get("curriculum") not in {"staged-combat", *TOURNAMENT_CURRICULA}:
         return config["scenario"], None, {config["scenario"]: 1.0}
 
     if episode <= 100:
@@ -58,20 +59,31 @@ def episode_plan(config, episode):
         )
         return scenario, None, {"coin-heaven": 0.25, "loot-crate": 0.75}
 
-    # tournament-combat uses actual four-player lineups; staged-combat keeps
-    # the historical two-player protocol for reproducibility. After the
-    # mixed opponent phase, tournament-combat consolidates on the hardest
-    # configured lineup (the default is 3x rule-based) while retaining a
-    # small solo replay share.
+    # The retained-solo variant deliberately generates solo transitions after
+    # episode 600. Replay weights alone cannot retain a task in a fresh buffer.
+    if (config.get("curriculum") == "tournament-combat-retained-solo" and
+            episode > 600 and config.get("classic_lineups")):
+        scenario = _cycled_choice(
+            ("classic", "classic", "classic", "coin-heaven", "loot-crate"),
+            episode - 601,
+        )
+        lineup = list(config["classic_lineups"][-1])
+        weights = {
+            "coin-heaven": 0.20,
+            "loot-crate": 0.20,
+            "classic|" + ",".join(lineup): 0.60,
+        }
+        return scenario, lineup if scenario == "classic" else None, weights
+
+    # Historical tournament-combat behavior remains unchanged.
     if (config.get("curriculum") == "tournament-combat" and episode > 600
             and config.get("classic_lineups")):
         lineup = list(config["classic_lineups"][-1])
-        weights = {
+        return "classic", lineup, {
             "coin-heaven": 0.125,
             "loot-crate": 0.125,
             "classic|" + ",".join(lineup): 0.75,
         }
-        return "classic", lineup, weights
 
     # Half classic experience, with the retained solo tasks sampled equally.
     scenario = _cycled_choice(
@@ -80,7 +92,7 @@ def episode_plan(config, episode):
     opponent = None
     if scenario == "classic":
         lineups = config.get("classic_lineups")
-        if config.get("curriculum") == "tournament-combat" and lineups:
+        if config.get("curriculum") in TOURNAMENT_CURRICULA and lineups:
             lineup_index = (episode - 301) // 2
             opponent = list(_cycled_choice(lineups, lineup_index))
             weights = {
@@ -121,7 +133,7 @@ def evaluate_checkpoint(config, checkpoint, episode, interactions, evaluation):
 
     evaluation_root = directory / "evaluation"
     if config.get("curriculum") in {"mixed", "staged-combat",
-                                     "tournament-combat"}:
+                                     *TOURNAMENT_CURRICULA}:
         evaluation_root = evaluation_root / evaluation_name
     output = evaluation_root / f"episode_{episode:04d}"
     command = [
@@ -184,7 +196,7 @@ def evaluate_all(config, learner, episode, interactions):
         {"name": scenario, "scenario": scenario, "opponents": []}
         for scenario in config["evaluation_scenarios"]
     ]
-    if config.get("curriculum") == "tournament-combat":
+    if config.get("curriculum") in TOURNAMENT_CURRICULA:
         for lineup in config.get("classic_lineups", []):
             opponents = list(lineup)
             evaluations.append({
@@ -253,7 +265,7 @@ def train(config):
     )
     learner = world.agents[0].backend.runner.fake_self
     classic_worlds = {}
-    if config.get("curriculum") in {"staged-combat", "tournament-combat"}:
+    if config.get("curriculum") in {"staged-combat", *TOURNAMENT_CURRICULA}:
         # Build one reusable world per lineup, but rebind each candidate
         # wrapper to the solo learner. This keeps one model, optimizer, and
         # replay buffer while rotating the classic lineup every episode.
@@ -288,7 +300,8 @@ def train(config):
         with open(curve_path) as file:
             curve = json.load(file)
     else:
-        curve = evaluate_all(config, learner, 0, 0)
+        curve = evaluate_all(config, learner, start_episode,
+                             int(getattr(learner, "env_steps", 0)))
         save_json(curve_path, curve)
     # A resumed checkpoint carries the interaction counter.  This preserves
     # epsilon/training progress in logs even though the current checkpoint
@@ -317,7 +330,7 @@ def train(config):
             if hasattr(learner.replay_buffer, "set_context"):
                 replay_tag = scenario
                 if (opponent is not None and
-                        config.get("curriculum") == "tournament-combat"):
+                        config.get("curriculum") in TOURNAMENT_CURRICULA):
                     replay_tag += "|" + ",".join(lineup)
                 learner.replay_buffer.set_context(replay_tag, replay_weights)
             epsilon = learner.epsilon
@@ -358,6 +371,14 @@ def train(config):
                                   getattr(learner, "trees", []) if tree is not None),
                 "training_seconds": training_seconds,
             }
+            if hasattr(learner, "combat_env_steps"):
+                record["combat_env_steps"] = learner.combat_env_steps
+                record["epsilon_after_round"] = learner.epsilon
+                record["replay_tag_counts"] = {
+                    tag: len(indices) for tag, indices in
+                    learner.replay_buffer.indices_by_tag.items()
+                }
+                record["effective_replay_weights"] = learner.replay_buffer.weights
             file.write(json.dumps(record) + "\n")
             file.flush()
             if episode % config["eval_every"] == 0 or episode == config["rounds"]:
@@ -376,11 +397,13 @@ def parse_args(argv=None):
                         default="loot-crate")
     parser.add_argument("--curriculum",
                         choices=["none", "mixed", "staged-combat",
-                                 "tournament-combat"],
+                                 "tournament-combat",
+                                 "tournament-combat-retained-solo"],
                         default="none",
                         help=("Training schedule: none, alternating solo mixed, or "
                               "100 navigation / 200 crate / 300 retained-combat. "
-                              "tournament-combat uses four-player lineups."))
+                              "tournament-combat uses four-player lineups; "
+                              "the retained-solo variant interleaves solo rounds."))
     parser.add_argument("--diagnostics", action="store_true",
                         help="Record crate/coin progress diagnostics during evaluation.")
     parser.add_argument("--opponents", nargs="*", default=[])
@@ -419,6 +442,11 @@ def parse_args(argv=None):
         help=("Continue an existing output directory from its latest per-seed "
               "checkpoint; --rounds is the target total episode count."),
     )
+    parser.add_argument(
+        "--initial-checkpoints", type=Path, nargs="+",
+        help=("Initialize a new run from one checkpoint per training seed. "
+              "Checkpoint filenames must be episode_NNNN.pkl."),
+    )
     parser.add_argument("--output", type=Path)
     parser.add_argument("--worker", type=Path, help=SUPPRESS)
     args = parser.parse_args(argv)
@@ -431,9 +459,19 @@ def parse_args(argv=None):
             parser.error("--resume requires an existing --output directory.")
     elif args.output.exists():
         parser.error("Choose a new --output directory, or pass --resume.")
+    if args.resume and args.initial_checkpoints:
+        parser.error("Choose --resume or --initial-checkpoints, not both.")
+    if args.initial_checkpoints:
+        if len(args.initial_checkpoints) != len(args.seeds):
+            parser.error("--initial-checkpoints requires one path per training seed.")
+        for checkpoint in args.initial_checkpoints:
+            if not checkpoint.is_file():
+                parser.error(f"Initial checkpoint does not exist: {checkpoint}")
+            if not checkpoint.stem.startswith("episode_"):
+                parser.error("Initial checkpoint must be named episode_NNNN.pkl")
     if len(args.opponents) > 3:
         parser.error("At most three opponents are allowed.")
-    if args.curriculum in {"mixed", "staged-combat", "tournament-combat"} and args.opponents:
+    if args.curriculum in {"mixed", "staged-combat", *TOURNAMENT_CURRICULA} and args.opponents:
         parser.error("Curriculum schedules manage opponents internally; omit --opponents.")
     if not (SOURCE_DIR / "agent_code" / args.agent / "callbacks.py").is_file():
         parser.error(f"Unknown training agent: {args.agent}")
@@ -446,15 +484,15 @@ def parse_args(argv=None):
     for opponent in args.opponents:
         if not (SOURCE_DIR / "agent_code" / opponent / "callbacks.py").is_file():
             parser.error(f"Unknown opponent: {opponent}")
-    if args.curriculum in {"staged-combat", "tournament-combat"}:
+    if args.curriculum in {"staged-combat", *TOURNAMENT_CURRICULA}:
         if len(args.classic_opponents) > 3:
             parser.error("At most three staged classic opponents are supported.")
         for opponent in args.classic_opponents:
             if not (SOURCE_DIR / "agent_code" / opponent / "callbacks.py").is_file():
                 parser.error(f"Unknown staged classic opponent: {opponent}")
     if args.classic_lineup is not None:
-        if args.curriculum != "tournament-combat":
-            parser.error("--classic-lineup requires --curriculum tournament-combat")
+        if args.curriculum not in TOURNAMENT_CURRICULA:
+            parser.error("--classic-lineup requires a tournament-combat curriculum")
         if not args.classic_lineup:
             parser.error("At least one classic lineup is required")
         for lineup in args.classic_lineup:
@@ -463,7 +501,7 @@ def parse_args(argv=None):
             for opponent in lineup:
                 if not (SOURCE_DIR / "agent_code" / opponent / "callbacks.py").is_file():
                     parser.error(f"Unknown classic lineup opponent: {opponent}")
-    if args.curriculum == "tournament-combat" and args.classic_lineup is None:
+    if args.curriculum in TOURNAMENT_CURRICULA and args.classic_lineup is None:
         args.classic_lineup = [
             ["peaceful_agent"],
             ["coin_collector_agent"],
@@ -507,9 +545,13 @@ def run_training(args):
     config["output"] = str(args.output)
     if args.resume:
         config["resumed_from_rounds"] = previous_config.get("rounds")
+    if args.initial_checkpoints:
+        config["initial_checkpoints"] = [
+            str(path.resolve()) for path in args.initial_checkpoints
+        ]
     config["evaluation_scenarios"] = (
         ["coin-heaven", "loot-crate"]
-        if args.curriculum in {"mixed", "staged-combat", "tournament-combat"}
+        if args.curriculum in {"mixed", "staged-combat", *TOURNAMENT_CURRICULA}
         else [args.scenario]
     )
     config["hyperparameters"] = {
@@ -571,6 +613,8 @@ def run_training(args):
         "Agent_027_combat_ddqn_short_cycle_staged_replay_agent",
         "Agent_028_combat_ddqn_dueling_256_agent",
         "Agent_029_combat_ddqn_adversarial_window_agent",
+        "Agent_030_combat_ddqn_escape_replay_agent",
+        "Agent_031_combat_ddqn_offensive_escape_agent",
     }:
         # This successor intentionally reuses the repaired DQN implementation
         # and history/safety code while replacing only its representation.
@@ -584,6 +628,7 @@ def run_training(args):
             SOURCE_DIR / "agent_code" / "combat_fqi_agent" / "safety.py",
             SOURCE_DIR / "agent_code" / "combat_fqi_history_antistag_agent" / "features.py",
             SOURCE_DIR / "agent_code" / "combat_fqi_history_antistag_agent" / "safety.py",
+            SOURCE_DIR / "agent_code" / "combat_fqi_history_antistag_agent" / "train.py",
         ])
     if args.agent == "Agent_027_combat_ddqn_short_cycle_staged_replay_agent":
         source_paths.extend([
@@ -597,7 +642,11 @@ def run_training(args):
             SOURCE_DIR / "agent_code" / "Agent_027_combat_ddqn_short_cycle_staged_replay_agent" / "replay.py",
             SOURCE_DIR / "agent_code" / "Agent_025_combat_ddqn_short_cycle_agent" / "features.py",
         ])
-    if args.agent == "Agent_029_combat_ddqn_adversarial_window_agent":
+    if args.agent in {
+        "Agent_029_combat_ddqn_adversarial_window_agent",
+        "Agent_030_combat_ddqn_escape_replay_agent",
+        "Agent_031_combat_ddqn_offensive_escape_agent",
+    }:
         source_paths.extend([
             SOURCE_DIR / "agent_code" / args.agent / "replay.py",
             SOURCE_DIR / "agent_code" / "Agent_027_combat_ddqn_short_cycle_staged_replay_agent" / "train.py",
@@ -605,6 +654,17 @@ def run_training(args):
             SOURCE_DIR / "agent_code" / "Agent_025_combat_ddqn_short_cycle_agent" / "features.py",
             SOURCE_DIR / "agent_code" / "combat_dqn_r_topology_agent" / "features.py",
         ])
+    if args.agent in {"Agent_030_combat_ddqn_escape_replay_agent",
+                      "Agent_031_combat_ddqn_offensive_escape_agent"}:
+        source_paths.extend([
+            SOURCE_DIR / "agent_code" / "Agent_029_combat_ddqn_adversarial_window_agent" / "callbacks.py",
+            SOURCE_DIR / "agent_code" / "Agent_029_combat_ddqn_adversarial_window_agent" / "features.py",
+            SOURCE_DIR / "agent_code" / "Agent_029_combat_ddqn_adversarial_window_agent" / "replay.py",
+            SOURCE_DIR / "agent_code" / "Agent_030_combat_ddqn_escape_replay_agent" / "train.py",
+            SOURCE_DIR / "agent_code" / "Agent_030_combat_ddqn_escape_replay_agent" / "replay.py",
+        ])
+    if args.agent == "Agent_031_combat_ddqn_offensive_escape_agent":
+        source_paths.append(SOURCE_DIR / "prepare_offensive_checkpoint.py")
     if args.agent == "Agent_023_spatial_hybrid_rainbow_agent":
         # Agent 023 is intentionally self-contained; include every runtime
         # module in provenance rather than relying on a shared DQN package.
@@ -652,8 +712,24 @@ def run_training(args):
                 previous_seed_config = json.load(file)
         else:
             directory.mkdir()
-            checkpoint = None
-            checkpoint_episode = 0
+            checkpoint = (
+                args.initial_checkpoints[index].resolve()
+                if args.initial_checkpoints else None
+            )
+            if checkpoint is not None:
+                try:
+                    checkpoint_episode = int(checkpoint.stem.rsplit("_", 1)[1])
+                except (IndexError, ValueError) as error:
+                    raise ValueError(
+                        f"Invalid initial checkpoint filename: {checkpoint}"
+                    ) from error
+                if checkpoint_episode >= args.rounds:
+                    raise ValueError(
+                        f"Initial checkpoint {checkpoint} is already at episode "
+                        f"{checkpoint_episode}; --rounds must be larger."
+                    )
+            else:
+                checkpoint_episode = 0
             previous_seed_config = {}
         run_config = config.copy()
         run_config["seed"] = seed

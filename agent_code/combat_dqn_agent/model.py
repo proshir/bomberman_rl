@@ -78,7 +78,7 @@ def vanilla_targets(target_net, next_states, rewards, dones, gamma,
 def save_checkpoint(learner, path):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({
+    checkpoint = {
         "format": "combat_vanilla_dqn_v1",
         "input_dim": learner.policy_net.input_dim,
         "n_actions": learner.policy_net.n_actions,
@@ -88,7 +88,10 @@ def save_checkpoint(learner, path):
         "epsilon": float(learner.epsilon),
         "env_steps": int(learner.env_steps),
         "optimizer_steps": int(learner.optimizer_steps),
-    }, path)
+    }
+    if hasattr(learner, "combat_env_steps"):
+        checkpoint["combat_env_steps"] = int(learner.combat_env_steps)
+    torch.save(checkpoint, path)
 
 
 def load_checkpoint(path):
