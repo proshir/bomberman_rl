@@ -6,6 +6,7 @@ import hashlib
 import importlib
 import json
 import logging
+import os
 import pickle
 import random
 import subprocess
@@ -148,8 +149,16 @@ def evaluate_checkpoint(config, checkpoint, episode, interactions, evaluation):
     if config.get("diagnostics"):
         command.append("--diagnostics")
     output.parent.mkdir(parents=True, exist_ok=True)
+    evaluation_env = os.environ.copy()
+    evaluation_env["CUDA_VISIBLE_DEVICES"] = ""
+    for variable in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+                     "NUMEXPR_NUM_THREADS"):
+        evaluation_env[variable] = "1"
     with open(output.with_suffix(".log"), "w") as log:
-        subprocess.run(command, check=True, stdout=log, stderr=subprocess.STDOUT)
+        subprocess.run(
+            command, check=True, stdout=log, stderr=subprocess.STDOUT,
+            env=evaluation_env,
+        )
     with open(output / "summary.json") as file:
         result = json.load(file)["agents"][config["agent"]]
     return {
@@ -394,11 +403,11 @@ def parse_args(argv=None):
     parser.add_argument("--eval-seats", type=int, nargs="+", choices=range(4),
                         default=[0, 1, 2, 3])
     parser.add_argument(
-        "--eval-workers", type=int, default=1,
+        "--eval-workers", type=int, default=8,
         help="CPU game workers within each frozen scenario evaluation.",
     )
     parser.add_argument(
-        "--eval-scenario-workers", type=int, default=1,
+        "--eval-scenario-workers", type=int, default=4,
         help="Frozen scenario evaluations to run concurrently per training seed.",
     )
     parser.add_argument(
