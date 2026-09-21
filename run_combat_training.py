@@ -29,7 +29,7 @@ DEFAULT_CLASSIC_OPPONENTS = [
     "peaceful_agent", "coin_collector_agent", "rule_based_agent",
 ]
 TOURNAMENT_CURRICULA = {"tournament-combat", "tournament-combat-retained-solo"}
-LEAGUE_CURRICULA = {"league-combat"}
+LEAGUE_CURRICULA = {"league-combat", "agent038-population"}
 
 
 def _cycled_choice(options, offset):
@@ -39,6 +39,30 @@ def _cycled_choice(options, offset):
 def episode_plan(config, episode):
     """Return scenario, optional opponent, and replay weights for one episode."""
     if config.get("curriculum") in LEAGUE_CURRICULA and episode > 300:
+        # Agent 038 uses the design's 70/15/15 population/solo mixture.
+        if config.get("curriculum") == "agent038-population":
+            offset = episode - 301
+            phase = offset % 20
+            scenario = (
+                "classic" if phase < 14
+                else "coin-heaven" if phase < 17
+                else "loot-crate"
+            )
+            lineups = config["classic_lineups"]
+            weights = {"coin-heaven": 0.15, "loot-crate": 0.15}
+            for lineup in lineups:
+                tag = "classic|" + ",".join(lineup)
+                weights[tag] = weights.get(tag, 0.0) + 0.70 / len(lineups)
+            if scenario != "classic":
+                return scenario, None, weights
+            combat_index = (offset // 20) * 14 + phase
+            cycle, within = divmod(combat_index, len(lineups))
+            order = list(range(len(lineups)))
+            random.Random(
+                (int(config["seed"]) + 1) * 1_000_003 + cycle
+            ).shuffle(order)
+            return scenario, list(lineups[order[within]]), weights
+
         # Three combat games and one game of each solo task per five rounds.
         # Shuffle the fixed lineup roster once per cycle for reproducible,
         # balanced exposure instead of relying on global RNG state.
@@ -464,7 +488,7 @@ def parse_args(argv=None):
                         choices=["none", "mixed", "staged-combat",
                                  "tournament-combat",
                                  "tournament-combat-retained-solo",
-                                 "league-combat"],
+                                 "league-combat", "agent038-population"],
                         default="none",
                         help=("Training schedule: none, alternating solo mixed, or "
                               "100 navigation / 200 crate / 300 retained-combat. "
@@ -725,6 +749,8 @@ def run_training(args):
         "Agent_031_combat_ddqn_offensive_escape_agent",
         "Agent_032_combat_ddqn_optimized_features_agent",
         "Agent_037_tournament_fast_ddqn_agent",
+        "Agent_038_symmetric_population_ddqn_agent",
+        "Agent_039_compact_audit_ddqn_agent",
     }:
         # This successor intentionally reuses the repaired DQN implementation
         # and history/safety code while replacing only its representation.
@@ -758,6 +784,8 @@ def run_training(args):
         "Agent_031_combat_ddqn_offensive_escape_agent",
         "Agent_032_combat_ddqn_optimized_features_agent",
         "Agent_037_tournament_fast_ddqn_agent",
+        "Agent_038_symmetric_population_ddqn_agent",
+        "Agent_039_compact_audit_ddqn_agent",
     }:
         source_paths.extend([
             SOURCE_DIR / "agent_code" / args.agent / "replay.py",
@@ -776,12 +804,27 @@ def run_training(args):
             SOURCE_DIR / "agent_code" / "Agent_030_combat_ddqn_escape_replay_agent" / "train.py",
             SOURCE_DIR / "agent_code" / "Agent_030_combat_ddqn_escape_replay_agent" / "replay.py",
         ])
-    if args.agent == "Agent_037_tournament_fast_ddqn_agent":
+    if args.agent in {
+        "Agent_037_tournament_fast_ddqn_agent",
+        "Agent_038_symmetric_population_ddqn_agent",
+        "Agent_039_compact_audit_ddqn_agent",
+    }:
         source_paths.extend([
             SOURCE_DIR / "agent_code" / "Agent_029_combat_ddqn_adversarial_window_agent" / "features.py",
             SOURCE_DIR / "agent_code" / "Agent_030_combat_ddqn_escape_replay_agent" / "train.py",
             SOURCE_DIR / "agent_code" / "Agent_032_combat_ddqn_optimized_features_agent" / "features.py",
             SOURCE_DIR / "agent_code" / "Agent_032_combat_ddqn_optimized_features_agent" / "replay.py",
+        ])
+    if args.agent in {
+        "Agent_038_symmetric_population_ddqn_agent",
+        "Agent_039_compact_audit_ddqn_agent",
+    }:
+        source_paths.extend([
+            SOURCE_DIR / "agent_code" / args.agent / "checkpoint.py",
+            SOURCE_DIR / "agent_code" / args.agent / "symmetry.py",
+            SOURCE_DIR / "agent_code" / "Agent_036_compact_fqi_robust_agent" / "features.py",
+            SOURCE_DIR / "agent_code" / "Agent_036_compact_fqi_robust_agent" / "safety.py",
+            SOURCE_DIR / "agent_code" / "Agent_037_tournament_fast_ddqn_agent" / "features.py",
         ])
     if args.agent == "Agent_031_combat_ddqn_offensive_escape_agent":
         source_paths.append(SOURCE_DIR / "prepare_offensive_checkpoint.py")
