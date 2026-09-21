@@ -343,6 +343,17 @@ def train(config):
                             desc=f"{config['agent']} seed {config['seed']}"):
             board_seed = config["board_start"] + episode - 1
             scenario, opponent, replay_weights = episode_plan(config, episode)
+            if config["agent"] in {"Agent_034_compact_fqi_agent",
+                                   "Agent_035_compact_fqi_symmetry_agent",
+                                   "Agent_036_compact_fqi_robust_agent"}:
+                learner.scenario_tag = scenario
+                learner.lineup_tag = (
+                    tuple(opponent) if isinstance(opponent, (list, tuple))
+                    else (() if opponent is None else (opponent,))
+                )
+                learner.board_seed = board_seed
+                if hasattr(learner, "replay_weights"):
+                    learner.replay_weights = replay_weights
             if opponent is None:
                 active_world, active_args = world, solo_args
             else:
@@ -355,7 +366,7 @@ def train(config):
             active_world.round = episode - 1
             active_args.seat = (episode - 1) % 4
             active_args.scenario = scenario
-            if hasattr(learner.replay_buffer, "set_context"):
+            if hasattr(getattr(learner, "replay_buffer", None), "set_context"):
                 replay_tag = scenario
                 if (opponent is not None and config.get("curriculum") in
                         (TOURNAMENT_CURRICULA | LEAGUE_CURRICULA)):
@@ -407,6 +418,32 @@ def train(config):
                     learner.replay_buffer.indices_by_tag.items()
                 }
                 record["effective_replay_weights"] = learner.replay_buffer.weights
+            if config["agent"] in {
+                    "Agent_035_compact_fqi_symmetry_agent",
+                    "Agent_036_compact_fqi_robust_agent"}:
+                record.update({
+                    "feature_seconds": learner.feature_seconds,
+                    "safety_seconds": learner.safety_seconds,
+                    "action_seconds": learner.action_seconds,
+                    "max_action_seconds": learner.max_action_seconds,
+                    "action_count": learner.action_count,
+                    "fit_seconds": learner.fit_seconds,
+                    "last_fit_records": learner.last_fit_records,
+                    "last_fit_tag_counts": {
+                        scenario + "|" + ",".join(lineup): count
+                        for (scenario, lineup), count in
+                        learner.last_fit_tag_counts.items()
+                    },
+                    "last_available_tag_counts": {
+                        scenario + "|" + ",".join(lineup): count
+                        for (scenario, lineup), count in
+                        learner.last_available_tag_counts.items()
+                    },
+                    "last_effective_scenario_weights": (
+                        learner.last_effective_scenario_weights
+                    ),
+                    "last_action_support": learner.last_action_support,
+                })
             file.write(json.dumps(record) + "\n")
             file.flush()
             if episode % config["eval_every"] == 0 or episode == config["rounds"]:
@@ -452,6 +489,11 @@ def parse_args(argv=None):
     )
     parser.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
     parser.add_argument("--rounds", type=int, default=300)
+    parser.add_argument(
+        "--board-stride", type=int,
+        help=("Distance between each seed's first training board. Defaults to "
+              "--rounds; set this explicitly for a shortened matched run."),
+    )
     parser.add_argument("--max-steps", type=int, default=400)
     parser.add_argument("--eval-every", type=int, default=100)
     parser.add_argument("--eval-seeds", type=int, nargs="+",
@@ -512,6 +554,8 @@ def parse_args(argv=None):
     if min(args.rounds, args.max_steps, args.eval_every,
            args.eval_workers, args.eval_scenario_workers) < 1:
         parser.error("Round and step counts must be positive.")
+    if args.board_stride is not None and args.board_stride < args.rounds:
+        parser.error("--board-stride must be at least --rounds.")
     for values in (args.seeds, args.eval_seeds, args.eval_seats):
         if len(set(values)) != len(values):
             parser.error("Seed and seat lists may not contain duplicates.")
@@ -558,7 +602,13 @@ def parse_args(argv=None):
                     parser.error(f"Unknown league evaluation opponent: {opponent}")
     else:
         args.league_eval_lineups = None
-    training_boards = set(range(4000, 4000 + args.rounds * len(args.seeds)))
+    board_stride = args.board_stride or args.rounds
+    training_boards = {
+        board
+        for index in range(len(args.seeds))
+        for board in range(4000 + index * board_stride,
+                           4000 + index * board_stride + args.rounds)
+    }
     if training_boards.intersection(args.eval_seeds):
         parser.error("Evaluation seeds overlap training board seeds.")
     return args
@@ -623,6 +673,7 @@ def run_training(args):
     if args.agent in {
         "combat_fqi_history_antistag_agent",
         "combat_fqi_history_antistag_topology_agent",
+        "Agent_034_compact_fqi_agent",
     }:
         # These variants intentionally import the already audited combat
         # feature and safety implementations; hash those dependencies for
@@ -630,6 +681,12 @@ def run_training(args):
         source_paths.extend([
             SOURCE_DIR / "agent_code" / "combat_fqi_agent" / "features.py",
             SOURCE_DIR / "agent_code" / "combat_fqi_agent" / "safety.py",
+        ])
+    if args.agent in {
+            "Agent_035_compact_fqi_symmetry_agent",
+            "Agent_036_compact_fqi_robust_agent"}:
+        source_paths.extend([
+            SOURCE_DIR / "agent_code" / args.agent / "symmetry.py",
         ])
     if args.agent == "combat_fqi_history_antistag_topology_agent":
         source_paths.extend([
@@ -789,7 +846,7 @@ def run_training(args):
         run_config["seed"] = seed
         run_config["output"] = str(directory)
         run_config["board_start"] = previous_seed_config.get(
-            "board_start", 4000 + index * args.rounds
+            "board_start", 4000 + index * (args.board_stride or args.rounds)
         )
         run_config["start_episode"] = checkpoint_episode
         if checkpoint is not None:
