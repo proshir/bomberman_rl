@@ -724,6 +724,7 @@ def run_training(args):
         "Agent_030_combat_ddqn_escape_replay_agent",
         "Agent_031_combat_ddqn_offensive_escape_agent",
         "Agent_032_combat_ddqn_optimized_features_agent",
+        "Agent_037_tournament_fast_ddqn_agent",
     }:
         # This successor intentionally reuses the repaired DQN implementation
         # and history/safety code while replacing only its representation.
@@ -756,6 +757,7 @@ def run_training(args):
         "Agent_030_combat_ddqn_escape_replay_agent",
         "Agent_031_combat_ddqn_offensive_escape_agent",
         "Agent_032_combat_ddqn_optimized_features_agent",
+        "Agent_037_tournament_fast_ddqn_agent",
     }:
         source_paths.extend([
             SOURCE_DIR / "agent_code" / args.agent / "replay.py",
@@ -773,6 +775,13 @@ def run_training(args):
             SOURCE_DIR / "agent_code" / "Agent_029_combat_ddqn_adversarial_window_agent" / "replay.py",
             SOURCE_DIR / "agent_code" / "Agent_030_combat_ddqn_escape_replay_agent" / "train.py",
             SOURCE_DIR / "agent_code" / "Agent_030_combat_ddqn_escape_replay_agent" / "replay.py",
+        ])
+    if args.agent == "Agent_037_tournament_fast_ddqn_agent":
+        source_paths.extend([
+            SOURCE_DIR / "agent_code" / "Agent_029_combat_ddqn_adversarial_window_agent" / "features.py",
+            SOURCE_DIR / "agent_code" / "Agent_030_combat_ddqn_escape_replay_agent" / "train.py",
+            SOURCE_DIR / "agent_code" / "Agent_032_combat_ddqn_optimized_features_agent" / "features.py",
+            SOURCE_DIR / "agent_code" / "Agent_032_combat_ddqn_optimized_features_agent" / "replay.py",
         ])
     if args.agent == "Agent_031_combat_ddqn_offensive_escape_agent":
         source_paths.append(SOURCE_DIR / "prepare_offensive_checkpoint.py")
