@@ -751,6 +751,7 @@ def run_training(args):
         "Agent_037_tournament_fast_ddqn_agent",
         "Agent_038_symmetric_population_ddqn_agent",
         "Agent_039_compact_audit_ddqn_agent",
+        "Agent_040_optimized_compact_ddqn_agent",
     }:
         # This successor intentionally reuses the repaired DQN implementation
         # and history/safety code while replacing only its representation.
@@ -786,6 +787,7 @@ def run_training(args):
         "Agent_037_tournament_fast_ddqn_agent",
         "Agent_038_symmetric_population_ddqn_agent",
         "Agent_039_compact_audit_ddqn_agent",
+        "Agent_040_optimized_compact_ddqn_agent",
     }:
         source_paths.extend([
             SOURCE_DIR / "agent_code" / args.agent / "replay.py",
@@ -808,6 +810,7 @@ def run_training(args):
         "Agent_037_tournament_fast_ddqn_agent",
         "Agent_038_symmetric_population_ddqn_agent",
         "Agent_039_compact_audit_ddqn_agent",
+        "Agent_040_optimized_compact_ddqn_agent",
     }:
         source_paths.extend([
             SOURCE_DIR / "agent_code" / "Agent_029_combat_ddqn_adversarial_window_agent" / "features.py",
@@ -818,6 +821,7 @@ def run_training(args):
     if args.agent in {
         "Agent_038_symmetric_population_ddqn_agent",
         "Agent_039_compact_audit_ddqn_agent",
+        "Agent_040_optimized_compact_ddqn_agent",
     }:
         source_paths.extend([
             SOURCE_DIR / "agent_code" / args.agent / "checkpoint.py",
