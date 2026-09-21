@@ -1,0 +1,17 @@
+{
+  "agent_name": "Agent_050_final_agent043",
+  "based_on": "Agent_043_novelty_credit_ddqn_agent",
+  "feature_schema": "agent043-agent042-novelty-v1",
+  "feature_size": 146,
+  "actions": ["UP", "DOWN", "LEFT", "RIGHT", "BOMB", "WAIT"],
+  "checkpoint": "tournament_checkpoint.pt",
+  "checkpoint_source": "Agent043 dataset warm-start seed 0, episode 650",
+  "checkpoint_pretraining_steps": 10000,
+  "official_inference": {
+    "multiprocessing": false,
+    "external_runtime_workers": false,
+    "cpu_compatible": true
+  },
+  "vendored_dependency_root": "_vendor/agent_code",
+  "created": "2026-09-21"
+}

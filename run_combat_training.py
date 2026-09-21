@@ -429,7 +429,13 @@ def train(config):
 
     start_episode = int(config.get("start_episode", 0))
     curve_path = directory / "learning_curve.json"
-    if start_episode and curve_path.is_file():
+    if config.get("no_eval"):
+        # A training-only continuation must not evaluate either the imported
+        # warm-start checkpoint or the final episode.  Keep an empty curve so
+        # the parent process can aggregate a completed no-eval run normally.
+        curve = []
+        save_json(curve_path, curve)
+    elif start_episode and curve_path.is_file():
         with open(curve_path) as file:
             curve = json.load(file)
     else:
@@ -551,7 +557,9 @@ def train(config):
                 })
             file.write(json.dumps(record) + "\n")
             file.flush()
-            if episode % config["eval_every"] == 0 or episode == config["rounds"]:
+            if (not config.get("no_eval") and
+                    (episode % config["eval_every"] == 0 or
+                     episode == config["rounds"])):
                 curve.extend(evaluate_all(config, learner, episode, interactions))
                 save_json(directory / "learning_curve.json", curve)
     world.end()
@@ -609,6 +617,10 @@ def parse_args(argv=None):
     )
     parser.add_argument("--max-steps", type=int, default=400)
     parser.add_argument("--eval-every", type=int, default=100)
+    parser.add_argument(
+        "--no-eval", action="store_true",
+        help="Train only; suppress all checkpoint evaluations, including the final episode.",
+    )
     parser.add_argument("--eval-seeds", type=int, nargs="+",
                         default=list(range(30000, 30008)))
     parser.add_argument("--eval-seats", type=int, nargs="+", choices=range(4),
