@@ -29,7 +29,17 @@ DEFAULT_CLASSIC_OPPONENTS = [
     "peaceful_agent", "coin_collector_agent", "rule_based_agent",
 ]
 TOURNAMENT_CURRICULA = {"tournament-combat", "tournament-combat-retained-solo"}
-LEAGUE_CURRICULA = {"league-combat", "agent038-population"}
+LEAGUE_CURRICULA = {
+    "league-combat", "agent038-population", "final-finetune",
+    "agent043-staged-league", "agent043-staged-league-memory-retention",
+}
+COMPLETE_LINEUP_CURRICULA = {
+    "final-finetune", "agent043-staged-league",
+    "agent043-staged-league-memory-retention",
+}
+FINAL_FINETUNE_FORBIDDEN_OPPONENTS = {
+    "coin_collector_agent", "peaceful_agent",
+}
 
 
 def _cycled_choice(options, offset):
@@ -38,6 +48,55 @@ def _cycled_choice(options, offset):
 
 def episode_plan(config, episode):
     """Return scenario, optional opponent, and replay weights for one episode."""
+    if config.get("curriculum") in {
+            "agent043-staged-league",
+            "agent043-staged-league-memory-retention"}:
+        # A strict three-stage progression requested for Agent 043:
+        # navigation foundation, balanced solo transfer, then only complete
+        # four-player Classic games from a focused opponent roster.
+        if episode <= 100:
+            return "coin-heaven", None, {"coin-heaven": 1.0}
+        if episode <= 300:
+            scenario = _cycled_choice(
+                ("coin-heaven", "loot-crate"), episode - 101,
+            )
+            return scenario, None, {
+                "coin-heaven": 0.50, "loot-crate": 0.50,
+            }
+
+        lineups = config["classic_lineups"]
+        offset = episode - 301
+        if config.get("curriculum") == "agent043-staged-league-memory-retention":
+            # Each deterministically shuffled ten-round block contains eight
+            # complete Classic games and one round of each solo task.  The
+            # ordering is random per seed/block, while the exact 80/10/10
+            # allocation and balanced lineup exposure remain reproducible.
+            block, within = divmod(offset, 10)
+            slots = [
+                ("classic", index % len(lineups)) for index in range(8)
+            ] + [("coin-heaven", None), ("loot-crate", None)]
+            random.Random(
+                (int(config["seed"]) + 1) * 1_000_003 + block
+            ).shuffle(slots)
+            scenario, lineup_index = slots[within]
+            weights = {"coin-heaven": 0.10, "loot-crate": 0.10}
+            for lineup in lineups:
+                weights["classic|" + ",".join(lineup)] = 0.80 / len(lineups)
+            if scenario != "classic":
+                return scenario, None, weights
+            return scenario, list(lineups[lineup_index]), weights
+
+        cycle, within = divmod(offset, len(lineups))
+        order = list(range(len(lineups)))
+        random.Random(
+            (int(config["seed"]) + 1) * 1_000_003 + cycle
+        ).shuffle(order)
+        weights = {
+            "classic|" + ",".join(lineup): 1.0 / len(lineups)
+            for lineup in lineups
+        }
+        return "classic", list(lineups[order[within]]), weights
+
     if config.get("curriculum") in LEAGUE_CURRICULA and episode > 300:
         # Agent 038 uses the design's 70/15/15 population/solo mixture.
         if config.get("curriculum") == "agent038-population":
@@ -56,6 +115,28 @@ def episode_plan(config, episode):
             if scenario != "classic":
                 return scenario, None, weights
             combat_index = (offset // 20) * 14 + phase
+            cycle, within = divmod(combat_index, len(lineups))
+            order = list(range(len(lineups)))
+            random.Random(
+                (int(config["seed"]) + 1) * 1_000_003 + cycle
+            ).shuffle(order)
+            return scenario, list(lineups[order[within]]), weights
+
+        if config.get("curriculum") == "final-finetune":
+            # Keep solo retention, but make every non-solo game a complete
+            # four-player Classic lineup.  The launch script supplies the
+            # frozen rule-based/imported opponent roster.
+            offset = episode - 301
+            scenario = ("classic", "classic", "classic",
+                        "coin-heaven", "loot-crate")[offset % 5]
+            lineups = config["classic_lineups"]
+            weights = {"coin-heaven": 0.20, "loot-crate": 0.20}
+            for lineup in lineups:
+                tag = "classic|" + ",".join(lineup)
+                weights[tag] = weights.get(tag, 0.0) + 0.60 / len(lineups)
+            if scenario != "classic":
+                return scenario, None, weights
+            combat_index = (offset // 5) * 3 + offset % 5
             cycle, within = divmod(combat_index, len(lineups))
             order = list(range(len(lineups)))
             random.Random(
@@ -488,12 +569,20 @@ def parse_args(argv=None):
                         choices=["none", "mixed", "staged-combat",
                                  "tournament-combat",
                                  "tournament-combat-retained-solo",
-                                 "league-combat", "agent038-population"],
+                                 "league-combat", "agent038-population",
+                                 "final-finetune", "Final_finetune",
+                                 "agent043-staged-league",
+                                 "agent043-staged-league-memory-retention"],
                         default="none",
                         help=("Training schedule: none, alternating solo mixed, or "
                               "100 navigation / 200 crate / 300 retained-combat. "
                               "tournament-combat uses four-player lineups; "
-                              "the retained-solo variant interleaves solo rounds."))
+                              "the retained-solo variant interleaves solo rounds; "
+                              "final-finetune retains solo rounds but uses only "
+                              "complete four-player lineups outside solo training; "
+                              "agent043-staged-league uses 100 Coin Heaven, 200 "
+                              "balanced solo, then 600 complete Classic rounds; "
+                              "its memory-retention variant keeps 20% solo rehearsal."))
     parser.add_argument("--diagnostics", action="store_true",
                         help="Record crate/coin progress diagnostics during evaluation.")
     parser.add_argument("--opponents", nargs="*", default=[])
@@ -549,6 +638,8 @@ def parse_args(argv=None):
     parser.add_argument("--output", type=Path)
     parser.add_argument("--worker", type=Path, help=SUPPRESS)
     args = parser.parse_args(argv)
+    if args.curriculum == "Final_finetune":
+        args.curriculum = "final-finetune"
     if args.worker:
         return args
     if args.output is None:
@@ -586,8 +677,7 @@ def parse_args(argv=None):
     for opponent in args.opponents:
         if not (SOURCE_DIR / "agent_code" / opponent / "callbacks.py").is_file():
             parser.error(f"Unknown opponent: {opponent}")
-    if args.curriculum in {"staged-combat", *TOURNAMENT_CURRICULA,
-                           *LEAGUE_CURRICULA}:
+    if args.curriculum in {"staged-combat", *TOURNAMENT_CURRICULA}:
         if len(args.classic_opponents) > 3:
             parser.error("At most three staged classic opponents are supported.")
         for opponent in args.classic_opponents:
@@ -605,15 +695,29 @@ def parse_args(argv=None):
                 if not (SOURCE_DIR / "agent_code" / opponent / "callbacks.py").is_file():
                     parser.error(f"Unknown classic lineup opponent: {opponent}")
     if args.curriculum in (TOURNAMENT_CURRICULA | LEAGUE_CURRICULA) and args.classic_lineup is None:
-        args.classic_lineup = [
-            ["peaceful_agent"],
-            ["coin_collector_agent"],
-            ["rule_based_agent"],
-            ["rule_based_agent", "rule_based_agent", "rule_based_agent"],
-        ]
+        if args.curriculum in COMPLETE_LINEUP_CURRICULA:
+            args.classic_lineup = [["rule_based_agent"] * 3]
+        else:
+            args.classic_lineup = [
+                ["peaceful_agent"],
+                ["coin_collector_agent"],
+                ["rule_based_agent"],
+                ["rule_based_agent", "rule_based_agent", "rule_based_agent"],
+            ]
     args.classic_lineups = args.classic_lineup
+    if args.curriculum in COMPLETE_LINEUP_CURRICULA:
+        for lineup in args.classic_lineups:
+            if len(lineup) != 3:
+                parser.error(
+                    f"{args.curriculum} requires complete three-opponent Classic lineups"
+                )
+            forbidden = set(lineup) & FINAL_FINETUNE_FORBIDDEN_OPPONENTS
+            if forbidden:
+                parser.error(
+                    f"{args.curriculum} excludes " + ", ".join(sorted(forbidden))
+                )
     if args.league_eval_lineup is not None and args.curriculum not in LEAGUE_CURRICULA:
-        parser.error("--league-eval-lineup requires league-combat")
+        parser.error("--league-eval-lineup requires a league curriculum")
     if args.curriculum in LEAGUE_CURRICULA:
         args.league_eval_lineups = args.league_eval_lineup or [
             ["rule_based_agent"] * 3,
@@ -752,6 +856,9 @@ def run_training(args):
         "Agent_038_symmetric_population_ddqn_agent",
         "Agent_039_compact_audit_ddqn_agent",
         "Agent_040_optimized_compact_ddqn_agent",
+        "Agent_041_dynamic_nav_ddqn_agent",
+        "Agent_042_combat_progress_ddqn_agent",
+        "Agent_043_novelty_credit_ddqn_agent",
     }:
         # This successor intentionally reuses the repaired DQN implementation
         # and history/safety code while replacing only its representation.
@@ -788,6 +895,9 @@ def run_training(args):
         "Agent_038_symmetric_population_ddqn_agent",
         "Agent_039_compact_audit_ddqn_agent",
         "Agent_040_optimized_compact_ddqn_agent",
+        "Agent_041_dynamic_nav_ddqn_agent",
+        "Agent_042_combat_progress_ddqn_agent",
+        "Agent_043_novelty_credit_ddqn_agent",
     }:
         source_paths.extend([
             SOURCE_DIR / "agent_code" / args.agent / "replay.py",
@@ -811,6 +921,9 @@ def run_training(args):
         "Agent_038_symmetric_population_ddqn_agent",
         "Agent_039_compact_audit_ddqn_agent",
         "Agent_040_optimized_compact_ddqn_agent",
+        "Agent_041_dynamic_nav_ddqn_agent",
+        "Agent_042_combat_progress_ddqn_agent",
+        "Agent_043_novelty_credit_ddqn_agent",
     }:
         source_paths.extend([
             SOURCE_DIR / "agent_code" / "Agent_029_combat_ddqn_adversarial_window_agent" / "features.py",
@@ -822,6 +935,9 @@ def run_training(args):
         "Agent_038_symmetric_population_ddqn_agent",
         "Agent_039_compact_audit_ddqn_agent",
         "Agent_040_optimized_compact_ddqn_agent",
+        "Agent_041_dynamic_nav_ddqn_agent",
+        "Agent_042_combat_progress_ddqn_agent",
+        "Agent_043_novelty_credit_ddqn_agent",
     }:
         source_paths.extend([
             SOURCE_DIR / "agent_code" / args.agent / "checkpoint.py",
@@ -829,6 +945,45 @@ def run_training(args):
             SOURCE_DIR / "agent_code" / "Agent_036_compact_fqi_robust_agent" / "features.py",
             SOURCE_DIR / "agent_code" / "Agent_036_compact_fqi_robust_agent" / "safety.py",
             SOURCE_DIR / "agent_code" / "Agent_037_tournament_fast_ddqn_agent" / "features.py",
+        ])
+    if args.agent == "Agent_041_dynamic_nav_ddqn_agent":
+        source_paths.append(
+            SOURCE_DIR / "agent_code" /
+            "Agent_040_optimized_compact_ddqn_agent" / "features.py"
+        )
+    if args.agent == "Agent_042_combat_progress_ddqn_agent":
+        source_paths.extend([
+            SOURCE_DIR / "agent_code" /
+            "Agent_040_optimized_compact_ddqn_agent" / "features.py",
+            SOURCE_DIR / "agent_code" /
+            "Agent_040_optimized_compact_ddqn_agent" / "symmetry.py",
+            SOURCE_DIR / "agent_code" /
+            "Agent_040_optimized_compact_ddqn_agent" / "replay.py",
+            SOURCE_DIR / "agent_code" /
+            "Agent_041_dynamic_nav_ddqn_agent" / "features.py",
+        ])
+    if args.agent == "Agent_043_novelty_credit_ddqn_agent":
+        source_paths.extend([
+            SOURCE_DIR / "agent_code" /
+            "Agent_040_optimized_compact_ddqn_agent" / "features.py",
+            SOURCE_DIR / "agent_code" /
+            "Agent_040_optimized_compact_ddqn_agent" / "replay.py",
+            SOURCE_DIR / "agent_code" /
+            "Agent_040_optimized_compact_ddqn_agent" / "symmetry.py",
+            SOURCE_DIR / "agent_code" /
+            "Agent_041_dynamic_nav_ddqn_agent" / "features.py",
+            SOURCE_DIR / "agent_code" /
+            "Agent_042_combat_progress_ddqn_agent" / "callbacks.py",
+            SOURCE_DIR / "agent_code" /
+            "Agent_042_combat_progress_ddqn_agent" / "checkpoint.py",
+            SOURCE_DIR / "agent_code" /
+            "Agent_042_combat_progress_ddqn_agent" / "features.py",
+            SOURCE_DIR / "agent_code" /
+            "Agent_042_combat_progress_ddqn_agent" / "replay.py",
+            SOURCE_DIR / "agent_code" /
+            "Agent_042_combat_progress_ddqn_agent" / "symmetry.py",
+            SOURCE_DIR / "agent_code" /
+            "Agent_042_combat_progress_ddqn_agent" / "train.py",
         ])
     if args.agent == "Agent_031_combat_ddqn_offensive_escape_agent":
         source_paths.append(SOURCE_DIR / "prepare_offensive_checkpoint.py")
