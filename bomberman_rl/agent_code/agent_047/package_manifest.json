@@ -1,0 +1,21 @@
+{
+  "agent_name": "agent_047",
+  "based_on": "Agent_043_novelty_credit_ddqn_agent",
+  "feature_schema": "agent043-agent042-novelty-v1",
+  "feature_size": 146,
+  "actions": ["UP", "DOWN", "LEFT", "RIGHT", "BOMB", "WAIT"],
+  "checkpoint": "training.pkl",
+  "checkpoint_sha256": "bec39a0c68e4e74d7af3382164b22eec6f89001ae62e8cb8eb7c0cc9d85f5aa0",
+  "checkpoint_source": "Agent043 dataset warm-start mixed300 CPU continuation, seed 1",
+  "checkpoint_pretraining_steps": 300,
+  "official_inference": {
+    "multiprocessing": false,
+    "external_runtime_workers": false,
+    "cpu_compatible": true
+  },
+  "merged_dependency_root": ".",
+  "merged_dependency_module_prefix": "dep_",
+  "merged_dependency_module_count": 92,
+  "presentation_assets": ["agent.png", "bomb.png"],
+  "created": "2026-09-21"
+}

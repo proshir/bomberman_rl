@@ -1,0 +1,32 @@
+"""Agent 042 replay buffers with the Agent 043 state width."""
+
+from .dep_Agent_042_combat_progress_ddqn_agent_replay import (
+    CombatEscapeReplayBuffer as _CombatEscapeReplayBuffer,
+    ESCAPE_FRACTION,
+    ESCAPE_TAG,
+    ScenarioReplayBuffer as _ScenarioReplayBuffer,
+)
+
+from .features import FEATURE_SIZE
+
+
+class ScenarioReplayBuffer(_ScenarioReplayBuffer):
+    def __init__(self, capacity, seed=None, n_actions=6,
+                 state_dim=FEATURE_SIZE):
+        super().__init__(
+            capacity, seed=seed, n_actions=n_actions, state_dim=state_dim,
+        )
+
+
+class CombatEscapeReplayBuffer(_CombatEscapeReplayBuffer):
+    def __init__(self, capacity, seed=None, n_actions=6,
+                 state_dim=FEATURE_SIZE):
+        super().__init__(
+            capacity, seed=seed, n_actions=n_actions, state_dim=state_dim,
+        )
+
+
+__all__ = [
+    "CombatEscapeReplayBuffer", "ESCAPE_FRACTION", "ESCAPE_TAG",
+    "ScenarioReplayBuffer",
+]
