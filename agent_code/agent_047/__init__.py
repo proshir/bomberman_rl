@@ -1,6 +1,6 @@
-"""Agent 050: self-contained Agent043 runtime and merged dependencies.
+"""Agent 047: self-contained Agent 043-derived runtime.
 
-All custom dependency packages used by the Agent043 policy live directly in
-this package and are imported with relative imports. Loading Agent 050 does
-not modify the framework's ``agent_code`` package path.
+All agent-specific code lives directly in this package and uses local relative
+imports. Loading Agent 047 does not modify the framework's ``agent_code``
+package path.
 """

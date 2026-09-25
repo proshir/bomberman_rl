@@ -13,35 +13,205 @@ from functools import lru_cache
 import numpy as np
 import settings as s
 
-from .feature_short_cycle import (
-    short_cycle_features,
-)
-from .feature_combat_base import (
-    _direction,
-    bomb_value,
-    count_bucket,
-    crate_approach_tiles,
-    danger_bucket,
-    distance_bucket,
-    nearest_target,
-)
-from .feature_history import (
-    stagnation_bucket,
-)
 from .safety import (
     ACTIONS,
     MOVE_DELTAS,
     action_is_legal,
     blast_tiles,
+    bomb_value,
     build_danger_schedule,
     can_survive_action,
     escape_distance_after_bomb,
     safe_action_indices,
     best_survival_action_indices,
 )
-from .feature_crate_routes import (
-    candidate_crate_tiles,
-)
+
+
+def _direction(source, target):
+    if target is None:
+        return 0, 0
+    return (int(np.sign(target[0] - source[0])),
+            int(np.sign(target[1] - source[1])))
+
+
+def distance_bucket(distance):
+    """Compress path lengths without losing the important short distances."""
+    if distance is None or distance <= 0:
+        return 0
+    if distance == 1:
+        return 1
+    if distance == 2:
+        return 2
+    if distance <= 4:
+        return 3
+    if distance <= 7:
+        return 4
+    return 5
+
+
+def count_bucket(count):
+    if count <= 0:
+        return 0
+    if count <= 2:
+        return 1
+    if count <= 5:
+        return 2
+    if count <= 15:
+        return 3
+    return 4
+
+
+def danger_bucket(time_step):
+    if not time_step:
+        return 0
+    if time_step == 1:
+        return 1
+    if time_step == 2:
+        return 2
+    return 3
+
+
+def _free_neighbours(field, position):
+    x, y = position
+    for dx, dy in ((0, -1), (1, 0), (0, 1), (-1, 0)):
+        neighbour = x + dx, y + dy
+        if (0 <= neighbour[0] < field.shape[0] and
+                0 <= neighbour[1] < field.shape[1] and
+                field[neighbour] == 0):
+            yield neighbour
+
+
+def nearest_target(field, start, targets):
+    """Find the nearest target reachable through currently free board tiles."""
+    targets = set(targets)
+    if not targets:
+        return None, None
+    queue = deque([(start, 0)])
+    visited = {start}
+    while queue:
+        position, distance = queue.popleft()
+        if position in targets:
+            return position, distance
+        for neighbour in _free_neighbours(field, position):
+            if neighbour not in visited:
+                visited.add(neighbour)
+                queue.append((neighbour, distance + 1))
+    return None, None
+
+
+def crate_approach_tiles(field):
+    """Return free tiles from which a bomb could hit at least one crate."""
+    targets = set()
+    crate_positions = zip(*((field == 1).nonzero()))
+    for x, y in crate_positions:
+        for dx, dy in ((0, -1), (1, 0), (0, 1), (-1, 0)):
+            tile = int(x + dx), int(y + dy)
+            if (0 <= tile[0] < field.shape[0] and
+                    0 <= tile[1] < field.shape[1] and field[tile] == 0):
+                targets.add(tile)
+    return targets
+
+
+def stagnation_bucket(steps):
+    """Compress time without progress into ranges useful to small trees."""
+    if steps <= 2:
+        return 0
+    if steps <= 4:
+        return 1
+    if steps <= 8:
+        return 2
+    if steps <= 16:
+        return 3
+    if steps <= 32:
+        return 4
+    return 5
+
+
+OPPOSITE = {0: 2, 2: 0, 1: 3, 3: 1}
+
+
+def _one_hot(action):
+    result = np.zeros(len(ACTIONS), dtype=float)
+    if action is not None and 0 <= int(action) < len(ACTIONS):
+        result[int(action)] = 1.0
+    return result
+
+
+def short_cycle_features(action_history=(), action_successes=(),
+                         position_history=()):
+    """Encode recent actions and repeated movement patterns."""
+    actions = list(action_history)[-8:]
+    successes = list(action_successes)[-8:]
+    positions = [tuple(position) for position in position_history][-8:]
+
+    previous_two = actions[-2:]
+    action_values = []
+    for action in previous_two:
+        action_values.extend(_one_hot(action))
+    while len(action_values) < 2 * len(ACTIONS):
+        action_values.extend(np.zeros(len(ACTIONS), dtype=float))
+
+    success_values = [float(value) for value in successes[-2:]]
+    success_values = [0.0] * (2 - len(success_values)) + success_values
+
+    reversal = 0.0
+    if len(actions) >= 2:
+        first, second = actions[-2:]
+        reversal = float(first in OPPOSITE and OPPOSITE[first] == second)
+
+    waits = 0
+    for action in reversed(actions):
+        if action != ACTIONS.index("WAIT"):
+            break
+        waits += 1
+
+    two_cycle = 0.0
+    if len(positions) >= 4:
+        two_cycle = float(
+            positions[-4] == positions[-2] and
+            positions[-3] == positions[-1] and
+            positions[-4] != positions[-3]
+        )
+
+    four_cycle = 0.0
+    if len(positions) >= 8:
+        four_cycle = float(positions[-8:-4] == positions[-4:])
+
+    displacement = 0.0
+    if len(positions) >= 2:
+        start, end = positions[0], positions[-1]
+        displacement = min(
+            1.0, (abs(end[0] - start[0]) + abs(end[1] - start[1])) / 8.0
+        )
+
+    values = np.asarray(
+        action_values + success_values + [
+            reversal, min(1.0, waits / 8.0), two_cycle, four_cycle,
+            displacement,
+        ],
+        dtype=float,
+    )
+    if len(values) != 19:
+        raise AssertionError(
+            f"Agent 025 short-cycle size changed: expected 19, got {len(values)}"
+        )
+    return values
+
+
+def candidate_crate_tiles(field):
+    """Every free bomb tile whose ray can hit at least one current crate."""
+    candidates = set()
+    for x, y in zip(*(field == 1).nonzero()):
+        for dx, dy in (MOVE_DELTAS[action] for action in ACTIONS[:4]):
+            for distance in range(1, s.BOMB_POWER + 1):
+                tile = (int(x + dx * distance), int(y + dy * distance))
+                if (not (0 <= tile[0] < field.shape[0] and
+                         0 <= tile[1] < field.shape[1]) or
+                        field[tile] == -1):
+                    break
+                if field[tile] == 0:
+                    candidates.add(tile)
+    return candidates
 
 
 FEATURE_SIZE = 104
@@ -568,9 +738,9 @@ def state_to_features(game_state, previous_action=None, recent_visits=0,
 
 __all__ = [
     "ACTIONS", "AGENT_039_FEATURE_SIZE", "FEATURE_SCHEMA", "FEATURE_SIZE",
-    "GLOBAL_ARMED_OPPONENT_INDEX", "OPPONENT_BLOCK_SIZE",
-    "OPPONENT_BLOCK_START", "PATCH_OFFSETS", "PATCH_START",
-    "ROUTE_FEATURE_SIZE", "ROUTE_STARTS", "SHORT_CYCLE_STARTS",
-    "StateContext", "any_armed_opponent", "candidate_crate_tiles",
-    "state_to_features",
+    "GLOBAL_ARMED_OPPONENT_INDEX", "OPPONENT_BLOCK_SIZE", "PATCH_OFFSETS",
+    "OPPONENT_BLOCK_START", "PATCH_START", "ROUTE_FEATURE_SIZE",
+    "ROUTE_STARTS", "SHORT_CYCLE_STARTS", "StateContext",
+    "any_armed_opponent", "candidate_crate_tiles", "crate_approach_tiles",
+    "distance_bucket", "state_to_features",
 ]

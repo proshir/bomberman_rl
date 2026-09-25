@@ -4,9 +4,8 @@ from collections import deque
 
 import numpy as np
 
-from .feature_combat_base import crate_approach_tiles, distance_bucket
-from .feature_combat_progress import (
-    BASE_FEATURE_SIZE,
+from .feature_compact import crate_approach_tiles, distance_bucket
+from .features import (
     COMBAT_PRESSURE_START,
     COMBAT_PROGRESS_START,
     COMBAT_REACHABLE_START,
@@ -173,9 +172,9 @@ def _transform_action_block(source, transform):
 
 
 def _transform_agent042_features(source, transform, game_state=None):
-    result = np.empty(BASE_FEATURE_SIZE + 36, dtype=np.float32)
-    result[:BASE_FEATURE_SIZE] = _transform_compact_features(
-        source[:BASE_FEATURE_SIZE], transform, game_state
+    result = np.empty(COMPACT_FEATURE_SIZE + 36, dtype=np.float32)
+    result[:COMPACT_FEATURE_SIZE] = _transform_compact_features(
+        source[:COMPACT_FEATURE_SIZE], transform, game_state
     )
     for start in NAV_BLOCK_STARTS + COMBAT_BLOCK_STARTS:
         result[start:start + 6] = _transform_action_block(

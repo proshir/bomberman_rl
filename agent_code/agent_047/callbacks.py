@@ -10,10 +10,10 @@ import torch
 from torch import optim
 
 from . import features
-from .checkpoint import expand_checkpoint
 from .features import ACTIONS, StateContext
 from .model import (
     DEVICE, EPSILON_END, LEARNING_RATE, N_ACTIONS, QNetwork,
+    expand_checkpoint,
     load_checkpoint, save_checkpoint,
 )
 

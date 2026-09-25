@@ -14,8 +14,8 @@
     "cpu_compatible": true
   },
   "standalone_package": true,
-  "local_module_count": 17,
-  "local_feature_helper_count": 9,
+  "local_module_count": 8,
+  "local_feature_helper_count": 1,
   "presentation_assets": ["agent.png", "bomb.png"],
   "created": "2026-09-21"
 }

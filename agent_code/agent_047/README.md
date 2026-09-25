@@ -1,12 +1,10 @@
-# agent_047 — standalone Agent 043 package
+# agent_047 — standalone Agent 043-derived package
 
-This directory is the final-project runtime package for Agent 043. It keeps
-the Agent 043 observation pipeline, DDQN policy, safety mask, temporal route
-features, and bounded novelty intervention. All runtime and training support
-is shipped in this directory, with no Python imports from other agent folders.
-The implementation has one local safety module, one training module, and one
-replay module; the route, topology, navigation, and combat feature blocks stay
-in nine small local feature helpers.
+This directory contains Agent 047, built from Agent 043's observation
+pipeline and DDQN policy. Its feature code is grouped into a compact encoder
+and one navigation, combat-progress, and novelty layer. Training, replay,
+safety, symmetry, and model code remain package-local. Agent 047 imports no
+Python modules from other agent folders.
 
 ## Running
 
@@ -29,6 +27,8 @@ scratch filesystem.
   external worker process.
 - Agent-specific callbacks, checkpoint handling, features, model, replay,
   safety, symmetry, and training code are package-local Python files.
+- The compact feature encoder contains the helpers it needs directly, so the
+  package does not carry unused historical feature wrappers.
 - The runtime checkpoint is the bundled `training.pkl` file (SHA-256
   `bec39a0c68e4e74d7af3382164b22eec6f89001ae62e8cb8eb7c0cc9d85f5aa0`).
 - `agent.png` and `bomb.png` are the package-local 30x30 presentation assets.
