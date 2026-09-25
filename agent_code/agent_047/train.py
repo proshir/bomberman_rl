@@ -8,42 +8,39 @@ import settings as s
 from torch.nn import functional as F
 from torch.nn.utils import clip_grad_norm_
 
-from . import dep_Agent_042_combat_progress_ddqn_agent_train as _base_train
-from . import dep_combat_dqn_agent_callbacks as _base_callbacks
-from . import dep_combat_dqn_agent_train as _dqn
-from .dep_combat_dqn_agent_model import DEVICE, dqn_targets, load_checkpoint
-
 from . import callbacks as _callbacks
 from .features import ACTIONS, FEATURE_SIZE, StateContext
+from .model import (
+    ALGORITHM, BATCH_SIZE, DEVICE, EPSILON_DECAY_STEPS, EPSILON_END,
+    EPSILON_START, GAMMA, GRADIENT_CLIP_NORM, HIDDEN_SIZE, LEARNING_RATE, N_ACTIONS,
+    REPLAY_CAPACITY, TARGET_UPDATE_EVERY, TRAIN_EVERY,
+    WARMUP_TRANSITIONS, dqn_targets, load_checkpoint,
+)
 from .replay import CombatEscapeReplayBuffer, ESCAPE_TAG
+from .safety import bomb_is_useful, earliest_danger
 from .symmetry import TRANSFORMS, transform_action, transform_features, transform_mask
 
 
-ALGORITHM = _base_train.ALGORITHM
-BATCH_SIZE = _base_train.BATCH_SIZE
-EPSILON_DECAY_STEPS = _base_train.EPSILON_DECAY_STEPS
-EPSILON_END = _base_train.EPSILON_END
-EPSILON_START = _base_train.EPSILON_START
-GAMMA = _base_train.GAMMA
-GRADIENT_CLIP_NORM = _base_train.GRADIENT_CLIP_NORM
-HIDDEN_SIZE = _base_train.HIDDEN_SIZE
-LEARNING_RATE = _base_train.LEARNING_RATE
-N_ACTIONS = _base_train.N_ACTIONS
-REPLAY_CAPACITY = _base_train.REPLAY_CAPACITY
-TARGET_UPDATE_EVERY = _base_train.TARGET_UPDATE_EVERY
-TRAIN_EVERY = _base_train.TRAIN_EVERY
-WARMUP_TRANSITIONS = _base_train.WARMUP_TRANSITIONS
-
-COMBAT_EPSILON_START = _base_train.COMBAT_EPSILON_START
-COMBAT_EPSILON_END = _base_train.COMBAT_EPSILON_END
-COMBAT_EPSILON_DECAY_STEPS = _base_train.COMBAT_EPSILON_DECAY_STEPS
-SOLO_EPSILON_START = _base_train.SOLO_EPSILON_START
-SOLO_EPSILON_END = _base_train.SOLO_EPSILON_END
-SOLO_EPSILON_DECAY_STEPS = _base_train.SOLO_EPSILON_DECAY_STEPS
+COMBAT_EPSILON_START = 0.30
+COMBAT_EPSILON_END = 0.05
+COMBAT_EPSILON_DECAY_STEPS = 100_000
+SOLO_EPSILON_START = 1.0
+SOLO_EPSILON_END = 0.05
+SOLO_EPSILON_DECAY_STEPS = 100_000
 
 N_STEP_RETURN = 3
 GAMMA_N = GAMMA ** N_STEP_RETURN
 POTENTIAL_SHAPING_SCALE = 0.05
+COIN_REWARD = 1.0
+KILL_REWARD = 5.0
+CRATE_REWARD = 0.2
+COIN_FOUND_REWARD = 0.2
+SURVIVAL_REWARD = 0.5
+DEATH_PENALTY = 5.0
+INVALID_ACTION_PENALTY = 1.0
+USELESS_BOMB_PENALTY = 0.1
+ESCAPE_REWARD = 0.1
+STEP_COST = 0.01
 
 
 def _combat_epsilon(step):
@@ -71,8 +68,23 @@ def _combat_potential(game_state):
 
 
 def reward_from_transition(old_state, action, new_state, events):
-    """Agent 042 reward plus bounded potential-based combat shaping."""
-    reward = _dqn.reward_from_transition(old_state, action, new_state, events)
+    """Outcome reward, safety shaping, and bounded combat potential."""
+    reward = -STEP_COST
+    reward += events.count(e.COIN_COLLECTED) * COIN_REWARD
+    reward += events.count(e.KILLED_OPPONENT) * KILL_REWARD
+    reward += events.count(e.CRATE_DESTROYED) * CRATE_REWARD
+    reward += events.count(e.COIN_FOUND) * COIN_FOUND_REWARD
+    reward += events.count(e.SURVIVED_ROUND) * SURVIVAL_REWARD
+    reward -= events.count(e.INVALID_ACTION) * INVALID_ACTION_PENALTY
+    if e.KILLED_SELF in events or e.GOT_KILLED in events:
+        reward -= DEATH_PENALTY
+    if action == "BOMB" and not bomb_is_useful(old_state):
+        reward -= USELESS_BOMB_PENALTY
+    if new_state is not None:
+        old_time = earliest_danger(old_state, old_state["self"][3])
+        new_time = earliest_danger(new_state, new_state["self"][3])
+        if old_time and (not new_time or new_time > old_time):
+            reward += ESCAPE_REWARD
     old_potential = _combat_potential(old_state)
     new_potential = _combat_potential(new_state)
     reward += POTENTIAL_SHAPING_SCALE * (
@@ -82,15 +94,21 @@ def reward_from_transition(old_state, action, new_state, events):
 
 
 def setup_training(self):
-    _dqn.setup_training(self)
+    self.pending = None
+    self.round_reward = 0.0
+    self.round_steps = 0
+    self.round_events = defaultdict(int)
+    self.round_loss_total = 0.0
+    self.round_loss_count = 0
+    self.last_round_average_loss = None
     self.replay_buffer = CombatEscapeReplayBuffer(
         REPLAY_CAPACITY, getattr(self, "seed", None), n_actions=N_ACTIONS,
         state_dim=FEATURE_SIZE,
     )
     self.replay_buffer.set_context("coin-heaven", {"coin-heaven": 1.0})
     checkpoint = (
-        load_checkpoint(_base_callbacks.RESUME_PATH)
-        if _base_callbacks.RESUME_PATH is not None else {}
+        load_checkpoint(_callbacks.RESUME_PATH)
+        if _callbacks.RESUME_PATH is not None else {}
     )
     self.combat_env_steps = int(checkpoint.get("combat_env_steps", 0))
     self.bomb_escape_steps_remaining = 0
@@ -258,7 +276,7 @@ def end_of_round(self, last_game_state, last_action, events):
         self.round_loss_total / self.round_loss_count
         if self.round_loss_count else None
     )
-    _base_callbacks.save_checkpoint(self, self.model_path)
+    _callbacks.save_checkpoint(self, self.model_path)
     self.round_reward = 0.0
     self.round_steps = 0
     self.round_events.clear()

@@ -6,7 +6,7 @@ from collections import deque
 
 import numpy as np
 
-from .dep_combat_fqi_agent_safety import (ACTIONS, MOVE_DELTAS, action_is_legal, bomb_value,
+from .safety import (ACTIONS, MOVE_DELTAS, action_is_legal, bomb_value,
                      build_danger_schedule, escape_distance_after_bomb,
                      safe_action_indices)
 

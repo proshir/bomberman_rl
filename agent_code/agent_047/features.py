@@ -2,8 +2,8 @@
 
 import numpy as np
 
-from . import dep_Agent_042_combat_progress_ddqn_agent_features as _base
-from .dep_Agent_042_combat_progress_ddqn_agent_features import (
+from . import feature_combat_progress as _base
+from .feature_combat_progress import (
     ACTIONS,
     MOVE_DELTAS,
     StateContext,

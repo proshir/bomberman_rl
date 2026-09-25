@@ -4,11 +4,11 @@
 
 import numpy as np
 
-from .dep_combat_fqi_history_antistag_agent_features import (
+from .feature_history import (
     ACTIONS,
     state_to_features as history_features,
 )
-from .dep_combat_fqi_history_antistag_topology_agent_features import (
+from .feature_local_topology import (
     local_topology_features,
 )
 

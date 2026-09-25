@@ -4,7 +4,7 @@
 
 import numpy as np
 
-from .dep_combat_fqi_history_antistag_agent_features import (
+from .feature_history import (
     ACTIONS,
     state_to_features as history_features,
 )

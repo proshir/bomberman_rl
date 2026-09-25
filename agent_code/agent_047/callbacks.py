@@ -5,14 +5,17 @@ from pathlib import Path
 
 import events as e
 import numpy as np
+import settings as s
 import torch
-
-from . import dep_combat_dqn_agent_callbacks as _base
-from .dep_combat_dqn_agent_model import DEVICE
+from torch import optim
 
 from . import features
 from .checkpoint import expand_checkpoint
 from .features import ACTIONS, StateContext
+from .model import (
+    DEVICE, EPSILON_END, LEARNING_RATE, N_ACTIONS, QNetwork,
+    load_checkpoint, save_checkpoint,
+)
 
 
 # Use the bundled Agent 043 seed-1 mixed-300 continuation checkpoint. Keeping
@@ -89,18 +92,63 @@ def _state_to_features(self, game_state, previous_action, recent_visits,
 def setup(self):
     self.feature_module = features
     self.dqn_algorithm = "ddqn"
-    _base.MODEL_PATH = MODEL_PATH
-    _base.RESUME_PATH = RESUME_PATH
-    original_loader = _base.load_checkpoint
-    if self.train and RESUME_PATH is not None:
-        _base.load_checkpoint = lambda path: expand_checkpoint(
-            original_loader(path)
-        )
-    try:
-        _base.setup(self)
-    finally:
-        _base.load_checkpoint = original_loader
-    self.feature_module = features
+    self.rng = np.random.default_rng(getattr(self, "seed", None))
+    self.model_path = Path(getattr(self, "model_path", MODEL_PATH))
+    self.feature_cache = {}
+    self.round_id = None
+    self.last_progress = None
+    self.last_progress_step = 0
+    self.previous_action = ACTIONS.index("WAIT")
+    self.positions = deque(maxlen=8)
+    probe_field = np.zeros((s.COLS, s.ROWS), dtype=int)
+    probe_field[0, :] = probe_field[-1, :] = -1
+    probe_field[:, 0] = probe_field[:, -1] = -1
+    probe_state = {
+        "round": 1, "step": 1, "field": probe_field, "bombs": [],
+        "explosion_map": np.zeros_like(probe_field), "coins": [(1, 1)],
+        "self": ("probe", 0, True, (1, 1)), "others": [],
+        "user_input": None,
+    }
+    network_class = QNetwork
+    self.policy_net = network_class(
+        len(features.state_to_features(probe_state)), N_ACTIONS
+    ).to(DEVICE)
+    self.target_net = network_class(
+        self.policy_net.input_dim, N_ACTIONS
+    ).to(DEVICE)
+    self.target_net.load_state_dict(self.policy_net.state_dict())
+    self.target_net.eval()
+    self.optimizer = optim.Adam(self.policy_net.parameters(), lr=LEARNING_RATE)
+    self.epsilon = 1.0
+    self.env_steps = 0
+    self.optimizer_steps = 0
+    if self.train:
+        resume_path = Path(RESUME_PATH) if RESUME_PATH is not None else None
+        if resume_path is not None:
+            checkpoint = expand_checkpoint(load_checkpoint(resume_path))
+            if int(checkpoint["input_dim"]) != self.policy_net.input_dim:
+                raise ValueError("DQN checkpoint feature dimension does not match.")
+            if int(checkpoint.get("n_actions", N_ACTIONS)) != N_ACTIONS:
+                raise ValueError("DQN checkpoint action dimension does not match.")
+            self.policy_net.load_state_dict(checkpoint["policy_state_dict"])
+            self.target_net.load_state_dict(checkpoint["target_state_dict"])
+            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            self.epsilon = float(checkpoint.get("epsilon", EPSILON_END))
+            self.env_steps = int(checkpoint.get("env_steps", 0))
+            self.optimizer_steps = int(checkpoint.get("optimizer_steps", 0))
+        elif self.model_path.exists():
+            raise FileExistsError(f"Checkpoint already exists: {self.model_path}")
+        self.model_path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        checkpoint = load_checkpoint(self.model_path)
+        if int(checkpoint["input_dim"]) != self.policy_net.input_dim:
+            raise ValueError("DQN checkpoint feature dimension does not match.")
+        self.policy_net.load_state_dict(checkpoint["policy_state_dict"])
+        self.target_net.load_state_dict(checkpoint["target_state_dict"])
+        self.epsilon = float(checkpoint.get("epsilon", EPSILON_END))
+        self.env_steps = int(checkpoint.get("env_steps", 0))
+        self.optimizer_steps = int(checkpoint.get("optimizer_steps", 0))
+        self.policy_net.eval()
     self.action_history = deque(maxlen=8)
     self.action_successes = deque(maxlen=8)
     self.last_observed_key = None
@@ -291,9 +339,6 @@ def act(self, game_state):
     self.last_action = choice
     self.last_action_state = game_state
     return ACTIONS[choice]
-
-
-save_checkpoint = _base.save_checkpoint
 
 
 __all__ = [

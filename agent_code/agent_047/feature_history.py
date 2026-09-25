@@ -4,8 +4,8 @@
 
 import numpy as np
 
-from .dep_combat_fqi_agent_features import state_to_features as combat_features
-from .dep_combat_fqi_history_antistag_agent_safety import ACTIONS
+from .feature_combat_base import state_to_features as combat_features
+from .safety import ACTIONS
 
 
 HISTORY_LENGTH = 8

@@ -11,7 +11,7 @@ from collections import deque
 import numpy as np
 import settings as s
 
-from .dep_Agent_036_compact_fqi_robust_agent_safety import (ACTIONS, MOVE_DELTAS, action_is_legal, bomb_value,
+from .safety import (ACTIONS, MOVE_DELTAS, action_is_legal, bomb_value,
                      can_survive_action, surviving_followup_actions)
 
 

@@ -10,16 +10,16 @@ safety candidate mask remains authoritative.
 
 import numpy as np
 
-from . import dep_Agent_040_optimized_compact_ddqn_agent_features as _base
-from .dep_Agent_040_optimized_compact_ddqn_agent_features import (
+from . import feature_compact as _base
+from .feature_compact import (
     ACTIONS,
     MOVE_DELTAS,
     StateContext,
 )
-from .dep_Agent_041_dynamic_nav_ddqn_agent_features import (
+from .feature_navigation import (
     _navigation_features,
 )
-from .dep_combat_fqi_agent_features import bomb_value
+from .feature_combat_base import bomb_value
 
 
 BASE_FEATURE_SIZE = _base.FEATURE_SIZE

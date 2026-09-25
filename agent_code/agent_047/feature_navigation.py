@@ -8,8 +8,8 @@ progress matters and when combat value should override it.
 
 import numpy as np
 
-from . import dep_Agent_040_optimized_compact_ddqn_agent_features as _base
-from .dep_Agent_040_optimized_compact_ddqn_agent_features import (
+from . import feature_compact as _base
+from .feature_compact import (
     ACTIONS,
     MOVE_DELTAS,
     StateContext,

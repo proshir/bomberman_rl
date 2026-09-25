@@ -13,10 +13,10 @@ from functools import lru_cache
 import numpy as np
 import settings as s
 
-from .dep_Agent_025_combat_ddqn_short_cycle_agent_features import (
+from .feature_short_cycle import (
     short_cycle_features,
 )
-from .dep_combat_fqi_agent_features import (
+from .feature_combat_base import (
     _direction,
     bomb_value,
     count_bucket,
@@ -25,10 +25,10 @@ from .dep_combat_fqi_agent_features import (
     distance_bucket,
     nearest_target,
 )
-from .dep_combat_fqi_history_antistag_agent_features import (
+from .feature_history import (
     stagnation_bucket,
 )
-from .dep_combat_fqi_history_antistag_agent_safety import (
+from .safety import (
     ACTIONS,
     MOVE_DELTAS,
     action_is_legal,
@@ -39,7 +39,7 @@ from .dep_combat_fqi_history_antistag_agent_safety import (
     safe_action_indices,
     best_survival_action_indices,
 )
-from .dep_Agent_036_compact_fqi_robust_agent_features import (
+from .feature_crate_routes import (
     candidate_crate_tiles,
 )
 

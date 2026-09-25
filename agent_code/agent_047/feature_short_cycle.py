@@ -4,10 +4,10 @@
 
 import numpy as np
 
-from .dep_combat_dqn_r_topology_agent_features import (
+from .feature_topology import (
     state_to_features as topology_features,
 )
-from .dep_combat_fqi_history_antistag_agent_features import ACTIONS
+from .feature_history import ACTIONS
 
 
 SHORT_CYCLE_FEATURES = 19
